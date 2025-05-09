@@ -91,13 +91,13 @@ def train():
     cache_dir = r"E:\KingCrimson Dataset\Simulate\data0\traindata"  # 缓存目录
 
     # Training parameters
-    steps_1 = 10000  # 90000  # Phase 1 training steps
-    steps_2 = 10000  # 10000  # Phase 2 training steps
-    steps_3 = 10000  # 400000  # Phase 3 training steps
+    steps_1 = 40000  # 90000  # Phase 1 training steps
+    steps_2 = 40000  # 10000  # Phase 2 training steps
+    steps_3 = 40000  # 400000  # Phase 3 training steps
 
-    snaperiod_1 =500   # 10000  # How often to save snapshots in phase 1
-    snaperiod_2 = 500 # 2000  # How often to save snapshots in phase 2
-    snaperiod_3 = 500   # 10000  # How often to save snapshots in phase 3
+    snaperiod_1 =1000   # 10000  # How often to save snapshots in phase 1
+    snaperiod_2 = 1000 # 2000  # How often to save snapshots in phase 2
+    snaperiod_3 = 1000   # 10000  # How often to save snapshots in phase 3
 
     batch_size = 16  # Batch size
     alpha = 4e-4  # Alpha parameter for loss weighting
@@ -865,6 +865,7 @@ def train():
     while step < steps_3:
         for batch in train_loader:
             # Prepare batch data
+            torch.cuda.empty_cache()
             batch_data = prepare_batch_data(batch, device)
             (
                 batch_local_inputs,
