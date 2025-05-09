@@ -91,22 +91,22 @@ class CompletionNetwork(nn.Module):
 
         # Global encoder branch
         self.global_enc1 = nn.Sequential(
-            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.global_enc2 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.global_enc3 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=0),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True)
         )
@@ -229,128 +229,6 @@ class CompletionNetwork(nn.Module):
         final_output = local_input * local_mask + (output_unstd) * (1 - local_mask)
         
         return final_output
-
-'''class CompletionNetwork(nn.Module):
-    def __init__(self, input_channels=1):
-        super(CompletionNetwork, self).__init__()
-        
-        # 为全局输入添加早期注意力模块
-        self.early_global_attention = EarlyAttentionModule(input_channels)
-
-        # Local encoder branch (processes 33x33 patches)
-        self.local_encoder = nn.Sequential(
-            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-        )
-        
-
-        # Global encoder branch (processes downsampled global data)
-        self.global_encoder = nn.Sequential(
-            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-        )
-
-        # Feature fusion
-        self.fusion = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-        )
-
-        # Decoder (to generate completed local patch)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, input_channels, kernel_size=3, stride=1, padding=1),
-            # nn.Tanh(),
-        )
-
-    def forward(self, local_input, local_mask, global_input, global_mask):
-        # Concatenate input and mask for both local and global streams
-        input_size = local_input.size()[2:]
-        local_x = torch.cat([-local_input, local_mask], dim=1)  # 局部输入为负
-
-        local_features = self.local_encoder(local_x)
-        
-        # 对全局输入应用早期注意力
-        global_input_attended = self.early_global_attention(global_input, global_mask)
-
-        
-        # Process global input (will need to be adjusted in shape)
-        global_x = torch.cat([-global_input_attended, global_mask], dim=1)  # 全局输入为负
-        global_features = self.global_encoder(global_x)
-
-        # Resize global features to match local features size
-        global_features = F.interpolate(
-            global_features,
-            size=local_features.size()[2:],
-            mode="bilinear",
-            align_corners=False,
-        )
-
-        # Combine features
-        combined_features = torch.cat([local_features, global_features], dim=1)
-        fused_features = self.fusion(combined_features)
-        
-
-        # Decode to generate completed output
-        output = self.decoder(fused_features)
-        output = F.interpolate(
-            output, size=input_size, mode="bilinear", align_corners=False
-        )
-        # print(f"meano: {torch.mean(-output*30)}")
-        final_output = local_input * local_mask + (-output) * (1 - local_mask)
-        return final_output  # 输出为负'''
-
-
-"""class LocalDiscriminator(nn.Module):
-    def __init__(self, input_channels=1):
-        super(LocalDiscriminator, self).__init__()
-        self.model = nn.Sequential(
-            nn.Conv2d(input_channels, 64, kernel_size=5, stride=2, padding=2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(128, 256, kernel_size=5, stride=2, padding=2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(256, 512, kernel_size=5, stride=2, padding=2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(512, 1, kernel_size=4, stride=1, padding=0),
-        )
-
-    def forward(self, x):
-        return self.model(x)"""
 
 
 class LocalDiscriminator(nn.Module):
@@ -644,6 +522,6 @@ if __name__ == "__main__":
             writer.close()
 
     # Run the tensorboard command
-    #os.system("tensorboard --logdir=logs")
+    os.system("tensorboard --logdir=logs")
     # Open the specified URL directly in the default web browser
     webbrowser.open("http://localhost:6006/?darkMode=true#graphs&run=.")
