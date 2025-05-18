@@ -15,7 +15,7 @@ from loss import completion_network_loss
 import torch.multiprocessing as mp
 
 # Import your models
-from models import CompletionNetwork, ContextDiscriminator
+from GLC.modelsh import CompletionNetwork, ContextDiscriminator
 
 # Import your custom dataset
 from DemDataset import DemDataset

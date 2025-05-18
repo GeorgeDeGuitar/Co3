@@ -10,7 +10,7 @@ from tqdm import tqdm
 from PIL import Image
 
 # Import your models
-from models import CompletionNetwork, ContextDiscriminator
+from GLC.modelsh import CompletionNetwork, ContextDiscriminator
 
 # Import your custom dataset
 from DemDataset import DemDataset

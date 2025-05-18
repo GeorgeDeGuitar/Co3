@@ -14,7 +14,7 @@ from torchvision.transforms.functional import to_pil_image
 from loss import  completion_network_loss
 
 # Import your models
-from models import CompletionNetwork, ContextDiscriminator
+from GLC.modelsh import CompletionNetwork, ContextDiscriminator
 
 # Import your custom dataset
 from DemDataset import DemDataset

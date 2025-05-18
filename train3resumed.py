@@ -12,7 +12,7 @@ import visdom
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_pil_image
 from loss import  completion_network_loss
-
+import torch.nn.functional as F
 # Import your models
 from models import CompletionNetwork, ContextDiscriminator
 
@@ -142,15 +142,15 @@ def train(resume_from=None):
     cache_dir = r"E:\KingCrimson Dataset\Simulate\data0\traindata"  # 缓存目录
 
     # Training parameters
-    steps_1 = 40000  # 90000  # Phase 1 training steps
+    steps_1 = 100000  # 90000  # Phase 1 training steps
     steps_2 = 20000  # 10000  # Phase 2 training steps
-    steps_3 = 60000  # 400000  # Phase 3 training steps
+    steps_3 = 200000  # 400000  # Phase 3 training steps
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
-    snaperiod_2 = 2000 # 2000  # How often to save snapshots in phase 2
-    snaperiod_3 = 2000   # 10000  # How often to save snapshots in phase 3
+    snaperiod_2 = 500 # 2000  # How often to save snapshots in phase 2
+    snaperiod_3 = 500   # 10000  # How often to save snapshots in phase 3
 
-    batch_size = 16  # Batch size
+    batch_size = 32  # Batch size
     alpha = 4e-1  # Alpha parameter for loss weighting
     validation_split = 0.1  # Percentage of data to use for validation
 
@@ -267,8 +267,11 @@ def train(resume_from=None):
     opt_cn = Adadelta(model_cn.parameters())
     opt_cd = Adadelta(model_cd.parameters())
     
+    # opt_cn = Adam(model_cn.parameters(), lr=1e-4)
+    # opt_cd = Adam(model_cd.parameters(), lr=1e-4)
+    
      # 初始化训练状态变量
-    phase = 1  # 从第一阶段开始
+    phase = 2  # 从第一阶段开始
     step_phase1 = 0
     step_phase2 = 0
     step_phase3 = 0
@@ -290,6 +293,13 @@ def train(resume_from=None):
             step_phase2 = steps_2  # 第二阶段已完成
             step_phase3 = step
             best_val_loss_joint = best_val_loss  # 在第三阶段使用
+    else:
+        if phase==2:
+            # Load pre-trained weights if available
+            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_best"
+            if os.path.exists(pretrained_weights_path):
+                model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device))
+                print(f"Loaded pre-trained weights from {pretrained_weights_path}")
 
     # Loss functions
     bce_loss = nn.BCELoss()
@@ -575,7 +585,7 @@ def train(resume_from=None):
     pbar = tqdm(total=steps_1)'''
     best_val_loss = float("inf")
     
-    if step_phase1 < steps_1:
+    if step_phase1 < steps_1 and phase == 1:
         print("开始/继续第1阶段训练...")
         model_cn.train()
         pbar = tqdm(total=steps_1, initial=step_phase1)
@@ -723,11 +733,108 @@ def train(resume_from=None):
     # =================================================
     # Training Phase 2: Train Context Discriminator only
     # =================================================
+    
+    
+    def balanced_discriminator_loss(real_preds, fake_preds, real_labels, fake_labels):
+        """
+        平衡的判别器损失，特别处理不平衡情况
+        """
+        # 基础MSE损失
+        real_loss = F.mse_loss(real_preds, real_labels)
+        fake_loss = F.mse_loss(fake_preds, fake_labels)
+        
+        # 计算真假分类情况
+        real_accuracy = (real_preds > 0.5).float().mean()
+        fake_accuracy = (fake_preds < 0.5).float().mean()
+        
+        # 如果分类严重不平衡
+        if fake_accuracy > 0.8 and real_accuracy < 0.2:
+            # 大幅增加真实样本权重，减少假样本权重
+            return real_loss * 5.0 + fake_loss * 0.1
+        elif real_accuracy > 0.8 and fake_accuracy < 0.2:
+            # 反之亦然
+            return real_loss * 0.1 + fake_loss * 5.0
+        else:
+            # 相对平衡情况
+            return (real_loss + fake_loss) / 2.0
+    
+    
+
+
+    # 采用加权BCE损失代替MSE
+    def weighted_bce_loss(predictions, targets, pos_weight=2.0, neg_weight=2.0):
+            """加权二元交叉熵损失，对边界情况给予更大惩罚"""
+            eps = 1e-7
+            # 限制预测值，避免数值问题
+            predictions = torch.clamp(predictions, eps, 1 - eps)
+            
+            # 正例和负例损失计算
+            pos_loss = -targets * torch.log(predictions) * pos_weight
+            neg_loss = -(1 - targets) * torch.log(1 - predictions) * neg_weight
+            
+            # 每个样本损失
+            loss = pos_loss + neg_loss
+            
+            return loss.mean()
+        
+    def feature_matching_loss(real_local_feat, real_global_feat, fake_local_feat, fake_global_feat):
+        """特征匹配损失，强制判别器学习区分特征"""
+        
+        # 计算特征距离
+        local_distance = F.l1_loss(real_local_feat.mean(0), fake_local_feat.mean(0))
+        global_distance = F.l1_loss(real_global_feat.mean(0), fake_global_feat.mean(0))
+        print(f"local distance: {local_distance}, global_distance: {global_distance}")
+        
+        # 我们希望特征具有区分性，因此损失需要优化
+        target_distance = torch.tensor(0.5, device=device)  # 希望特征有一定差距
+        
+        return F.mse_loss(local_distance, target_distance) + F.mse_loss(global_distance, target_distance)
+    
+    def analyze_predictions_distribution(real_preds, fake_preds):
+        """分析判别器的预测值分布"""
+        # 使用detach()分离计算图
+        real_vals = real_preds.detach().cpu().numpy().flatten()
+        fake_vals = fake_preds.detach().cpu().numpy().flatten()
+        
+        # 统计基本信息
+        print(f"真实样本预测值: 平均={real_vals.mean():.4f}, 中位数={np.median(real_vals):.4f}, 最小={real_vals.min():.4f}, 最大={real_vals.max():.4f}")
+        print(f"虚假样本预测值: 平均={fake_vals.mean():.4f}, 中位数={np.median(fake_vals):.4f}, 最小={fake_vals.min():.4f}, 最大={fake_vals.max():.4f}")
+        
+        # 检查0.5附近的分布情况
+        real_near_threshold = np.sum((real_vals > 0.45) & (real_vals < 0.55)) / len(real_vals)
+        fake_near_threshold = np.sum((fake_vals > 0.45) & (fake_vals < 0.55)) / len(fake_vals)
+        print(f"真实样本在阈值(0.45-0.55)附近的比例: {real_near_threshold:.2%}")
+        print(f"虚假样本在阈值(0.45-0.55)附近的比例: {fake_near_threshold:.2%}")
+        
+        # 检查是否存在对称模式
+        real_below = np.sum(real_vals < 0.5) / len(real_vals)
+        real_above = np.sum(real_vals > 0.5) / len(real_vals)
+        fake_below = np.sum(fake_vals < 0.5) / len(fake_vals)
+        fake_above = np.sum(fake_vals > 0.5) / len(fake_vals)
+        
+        print(f"真实样本分布: <0.5占{real_below:.2%}, >0.5占{real_above:.2%}")
+        print(f"虚假样本分布: <0.5占{fake_below:.2%}, >0.5占{fake_above:.2%}")
+        
+        # 检查是否刚好出现互补模式
+        complement_ratio = (real_above + fake_below) / 2
+        print(f"互补分布比例: {complement_ratio:.2%} (0.5表示完美互补)")
+        
+        return {
+            'real_mean': real_vals.mean(),
+            'fake_mean': fake_vals.mean(),
+            'real_median': np.median(real_vals),
+            'fake_median': np.median(fake_vals),
+            'real_above_threshold': real_above,
+            'fake_below_threshold': fake_below,
+            'complement_ratio': complement_ratio
+        }
+    
     '''print("Starting Phase 2 training...")
     pbar = tqdm(total=steps_2)
     step = 0'''
     best_acc = float("-inf")
-    if step_phase2 < steps_2:
+
+    if step_phase2 < steps_2 or phase == 2:
         print("开始/继续第2阶段训练...")
         pbar = tqdm(total=steps_2, initial=step_phase2)
         step = step_phase2
@@ -761,35 +868,50 @@ def train(resume_from=None):
                 )
 
                 # Train discriminator with fake samples
-                fake_labels = torch.zeros(fake_outputs.size(0), 1).to(device)
-                fake_predictions = model_cd(
+                fake_labels = torch.zeros(fake_outputs.size(0), 1).to(device)*0.05
+                fake_predictions, fake_lf, fake_gf = model_cd(
                     fake_outputs,
                     batch_local_masks,
-                    batch_global_targets,
+                    fake_global_embedded, # 之前是batch_global_targets
                     fake_global_mask_embedded,
                 )
-                loss_fake = bce_loss(fake_predictions, fake_labels)
+                # loss_fake = bce_loss(fake_predictions, fake_labels)
+                # loss_fake = F.mse_loss(fake_predictions, fake_labels)
+                 # 使用
+                
+                loss_fake = weighted_bce_loss(fake_predictions, fake_labels)
 
                 # Embed real inputs into global inputs
                 real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
-                    batch_local_inputs, batch_global_inputs, batch_global_masks, metadata
+                    batch_local_targets, batch_global_inputs, batch_global_masks, metadata
                 )
 
                 # Train discriminator with real samples
-                real_labels = torch.ones(batch_local_targets.size(0), 1).to(device)
-                real_predictions = model_cd(
+                real_labels = torch.ones(batch_local_targets.size(0), 1).to(device)*0.95
+                real_predictions, real_lf, real_gf = model_cd(
                     batch_local_targets,
                     batch_local_masks,
-                    batch_global_targets,
+                    real_global_embedded, # 之前是batch_global_targets
                     real_global_mask_embedded,
                 )
-                loss_real = bce_loss(real_predictions, real_labels)
+                # loss_real = bce_loss(real_predictions, real_labels)
+                # loss_real = F.mse_loss(real_predictions, real_labels)
+                loss_real = weighted_bce_loss(real_predictions, real_labels)
 
                 # Combined loss
-                loss = (loss_fake + loss_real) / 2.0
+                fm = feature_matching_loss(real_lf, real_gf, fake_lf, fake_gf)
+                loss = (loss_fake + loss_real) / 2.0 + fm
+                # print(f"loss_fake: {loss_fake.item()}, loss_real: {loss_real.item()}, matching loss: {fm.item()}")
+                
+                '''loss = balanced_discriminator_loss(
+                    real_predictions, fake_predictions, real_labels, fake_labels
+                )+feature_matching_loss(
+                    real_lf, real_gf, fake_lf, fake_gf)'''
+                
 
                 # Backward and optimize
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 5.0)
                 opt_cd.step()
                 opt_cd.zero_grad()
 
@@ -852,10 +974,10 @@ def train(resume_from=None):
                             )
 
                             # Get discriminator predictions for fake samples
-                            fake_preds = model_cd(
+                            fake_preds, fake_lf_preds, fake_gf_preds = model_cd(
                                 fake_outputs,
                                 val_local_masks,
-                                val_global_targets,
+                                val_fake_global_embedded,
                                 val_fake_global_mask_embedded,
                             )
 
@@ -870,10 +992,10 @@ def train(resume_from=None):
                             )
 
                             # Get discriminator predictions for real samples
-                            real_preds = model_cd(
+                            real_preds, real_lf_preds, real_gf_predss = model_cd(
                                 val_local_targets,
                                 val_local_masks,
-                                val_global_targets,
+                                val_real_global_embedded,
                                 val_real_global_mask_embedded,
                             )
 
@@ -884,7 +1006,8 @@ def train(resume_from=None):
                             ).item()
 
                     accuracy = correct / total if total > 0 else 0
-                    print(f"Step {step}, Discriminator Accuracy: {accuracy:.4f}")
+                    analyze_predictions_distribution(real_preds, fake_preds)
+                    print(f"Step {step}, Discriminator Accuracy: {accuracy:.4f}, Fake Success: {(fake_preds<0.5).sum()} / {fake_preds.size(0)}, Real Success: {(real_preds>=0.5).sum()} / {real_preds.size(0)}")
 
                     # Update Visdom plot for accuracy
                     viz.line(
@@ -958,7 +1081,7 @@ def train(resume_from=None):
     step = 0'''
     best_val_loss_joint = float("inf")
     
-    if step_phase3 < steps_3:
+    if step_phase3 < steps_3 or phase == 3:
         print("开始/继续第3阶段训练...")
         torch.cuda.empty_cache()
         pbar = tqdm(total=steps_3, initial=step_phase3)
@@ -999,10 +1122,10 @@ def train(resume_from=None):
                     batch_global_masks,
                     metadata,
                 )
-                fake_predictions = model_cd(
+                fake_predictions, fake_lf, fake_gf = model_cd(
                     fake_outputs,
                     batch_local_masks,
-                    batch_global_targets,
+                    fake_global_embedded,
                     fake_global_mask_embedded,
                 )
                 loss_cd_fake = bce_loss(fake_predictions, fake_labels)
@@ -1015,10 +1138,10 @@ def train(resume_from=None):
                     batch_global_masks,
                     metadata,
                 )
-                real_predictions = model_cd(
+                real_predictions, real_lf, real_gf = model_cd(
                     batch_local_targets,
                     batch_local_masks,
-                    batch_global_targets,
+                    real_global_embedded,
                     real_global_mask_embedded,
                 )
                 loss_cd_real = bce_loss(real_predictions, real_labels)
@@ -1071,10 +1194,10 @@ def train(resume_from=None):
                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
                     fake_outputs, batch_global_inputs, batch_global_masks, metadata
                 )
-                fake_predictions = model_cd(
+                fake_predictions, fake_lf, fake_gf = model_cd(
                     fake_outputs,
                     batch_local_masks,
-                    batch_global_targets,
+                    fake_global_embedded,
                     fake_global_mask_embedded,
                 )
                 loss_cn_adv = bce_loss(
@@ -1115,7 +1238,7 @@ def train(resume_from=None):
                     model_cn.eval()
                     val_loss = 0.0
 
-                    with torch.no_grad():
+                    '''with torch.no_grad():
                         for val_batch in val_subset_loader:
                             # Prepare validation batch
                             val_data = prepare_batch_data(val_batch, device)
@@ -1142,8 +1265,9 @@ def train(resume_from=None):
                             val_loss += batch_loss.item()
 
                     # Calculate average validation loss
-                    avg_val_loss = val_loss / len(val_subset_loader)
-                    print(f"Step {step}, Validation Loss: {avg_val_loss:.5f}")
+                    avg_val_loss = val_loss / len(val_subset_loader)'''
+                    avg_val_loss = validate(model_cn, val_subset_loader, device)
+                    # print(f"Step {step}, Validation Loss: {avg_val_loss:.5f}")
 
                     # Update Visdom plot for validation loss
                     viz.line(
@@ -1294,7 +1418,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=None, help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=None , help="resume from checkpoint path")
     args = parser.parse_args()
     
     train(resume_from=args.resume)

@@ -69,6 +69,7 @@ class SpatialConsistencyLoss(nn.Module):
         
         # 如果提供了掩码，则应用掩码
         if mask is not None:
+            mask=1-mask
             # 调整掩码大小以匹配梯度
             mask_dx = mask[:, :, :, 1:]
             mask_dy = mask[:, :, 1:, :]
@@ -863,12 +864,12 @@ def completion_network_loss(
     output, local_target, mask, global_target, completed, completed_mask, pos
 ):
     """Calculate the completion network loss."""
-    nw = 0# 0.3
+    nw = 0.4# 0.3
     bw = 0# 0.5 #completed，大部分在无法改变的global
     ew = 0# 0.2
     cw = 1
     cg=0
-    vw = 0 # 加mask
+    vw = 0.1 # 加mask
     gsw = 0 # 加mask
     ssimw = 0
     msw = 0
@@ -877,7 +878,7 @@ def completion_network_loss(
     criterion = nn.L1Loss()
     mse_loss = nn.MSELoss(reduction="mean")
     
-    # null_loss = criterion(local_target * (1-mask), output * (1-mask))  # target 是目标补全图像
+    null_loss = mse_loss(local_target * (1-mask), output * (1-mask))  # target 是目标补全图像
     '''valid_loss = mse_loss(
         local_target * mask, output * mask
     )  # target 是目标补全图像'''
@@ -890,19 +891,19 @@ def completion_network_loss(
     '''consistency_loss= improved_spatial_consistency_loss(
         output, local_target, mask
     )'''
-    mean_shift = mean_shift_loss(output, mask)  # 均值漂移损失，补全区域和已知区域的均值差异
-    spatial_consistency = SpatialConsistencyLoss(loss_type='window')
-    consistency_loss = spatial_consistency.gradient_based_loss(output, local_target)*10 # 空间一致性损失，可选择输入mask
-    enhanced_gradient_loss = EnhancedGradientConsistencyLoss()
+    # mean_shift = mean_shift_loss(output, mask)  # 均值漂移损失，补全区域和已知区域的均值差异
+    spatial_consistency = SpatialConsistencyLoss(loss_type='gradient')
+    consistency_loss = spatial_consistency.gradient_based_loss(output, local_target, mask)*10 # 空间一致性损失，可选择输入mask
+    # enhanced_gradient_loss = EnhancedGradientConsistencyLoss()
     # gradient_loss = enhanced_gradient_loss(output, local_target, mask) # 增强损失，加入mask作用
-    blurred_mask = enhanced_gradient_loss.smooth_mask_generate(mask)
-    variation_loss = total_variation_loss(output, mask)*10 #全变差损失，相邻像素差异
-    gradient_similarity = gradient_similarity_loss(output,local_target,mask)*1000 # 梯度相似性损失，梯度方向的一致性
-    ssim = ssim_loss(output,local_target)*10
-    print(f"Consistency_loss: {consistency_loss}, SSIM loss: {ssim}, Gradient similarity loss: {gradient_similarity}, Variation loss: {variation_loss}, Mean shift loss: {mean_shift}")
-    '''print(
-        f"Null loss: {null_loss.item()*nw}, Boundary loss: {boundary_loss*bw}, Edge loss: {edge_loss.item()*ew}, Consistency loss: {consistency_loss.item()*cw}"
-    )'''
+    # blurred_mask = enhanced_gradient_loss.smooth_mask_generate(mask)
+    variation_loss = total_variation_loss(output, mask)*100 #全变差损失，相邻像素差异
+    # gradient_similarity = gradient_similarity_loss(output,local_target)*1000 # 梯度相似性损失，梯度方向的一致性
+    # ssim = ssim_loss(output,local_target)*10
+    # print(f"Consistency_loss: {consistency_loss}, SSIM loss: {ssim}, Gradient similarity loss: {gradient_similarity}, Variation loss: {variation_loss}, Mean shift loss: {mean_shift}")
+    print(
+        f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Variation loss: {variation_loss*vw}"
+    )
     # return (null_loss * nw + bw * boundary_loss + edge_loss * ew + consistency_loss * cw + gradient_loss * cg + variation_loss*vw + gradient_similarity*gsw)/totalw
-    return (consistency_loss * cw +  variation_loss*vw + gradient_similarity*gsw+ssim*ssimw+mean_shift*msw)/totalw
+    return (null_loss * nw + consistency_loss * cw+variation_loss*vw)/totalw
 
