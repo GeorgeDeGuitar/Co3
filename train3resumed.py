@@ -23,7 +23,7 @@ from DemDataset import DemDataset
 # Import the custom_collate_fn function from your dataset module
 from DemDataset import custom_collate_fn
 # from DEMData import custom_collate_fn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 import gc
 
@@ -144,7 +144,7 @@ def train(resume_from=None):
 
     # Training parameters
     steps_1 = 100000  # 90000  # Phase 1 training steps
-    steps_2 = 20000  # 10000  # Phase 2 training steps
+    steps_2 = 200000  # 10000  # Phase 2 training steps
     steps_3 = 200000  # 400000  # Phase 3 training steps
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
@@ -922,11 +922,6 @@ def train(resume_from=None):
         print(f"真实样本预测值: 平均={real_vals.mean():.4f}, 中位数={np.median(real_vals):.4f}, 最小={real_vals.min():.4f}, 最大={real_vals.max():.4f}")
         print(f"虚假样本预测值: 平均={fake_vals.mean():.4f}, 中位数={np.median(fake_vals):.4f}, 最小={fake_vals.min():.4f}, 最大={fake_vals.max():.4f}")
         
-        # 检查0.5附近的分布情况
-        real_near_threshold = np.sum((real_vals > 0.45) & (real_vals < 0.55)) / len(real_vals)
-        fake_near_threshold = np.sum((fake_vals > 0.45) & (fake_vals < 0.55)) / len(fake_vals)
-        print(f"真实样本在阈值(0.45-0.55)附近的比例: {real_near_threshold:.2%}")
-        print(f"虚假样本在阈值(0.45-0.55)附近的比例: {fake_near_threshold:.2%}")
         
         # 检查是否存在对称模式
         real_below = np.sum(real_vals < 0.5) / len(real_vals)
@@ -959,24 +954,49 @@ def train(resume_from=None):
 
     if step_phase2 < steps_2 or phase == 2:
         print("开始/继续第2阶段训练...")
-        pbar = tqdm(total=steps_2, initial=step_phase2)
-        step = step_phase2
+    
+    # 使用Adam优化器
+    opt_cd = torch.optim.Adam(model_cd.parameters(), lr=2e-5, betas=(0.5, 0.999), eps=1e-8)
+    
+    # 创建梯度缩放器，用于自动混合精度训练
+    scaler = GradScaler(enabled=True)
+    
+    # 创建学习率调度器
+    from torch.optim.lr_scheduler import CosineAnnealingLR
+    scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-6)
+    
+    # 实例噪声初始值和最小值
+    start_noise = 0.1
+    min_noise = 0.001
+    
+    # 跟踪性能指标
+    running_loss = 0.0
+    running_real_acc = 0.0
+    running_fake_acc = 0.0
+    best_acc = float('-inf')
+    patience_counter = 0
+    max_patience = 10
+    
+    pbar = tqdm(total=steps_2, initial=step_phase2)
+    step = step_phase2
 
-        while step < steps_2:
-            for batch in train_loader:
-                # Prepare batch data
-                batch_data = prepare_batch_data(batch, device)
-                (
-                    batch_local_inputs,
-                    batch_local_masks,
-                    batch_local_targets,
-                    batch_global_inputs,
-                    batch_global_masks,
-                    batch_global_targets,
-                    metadata,
-                ) = batch_data
-
-                # Generate fake samples using completion network
+    while step < steps_2:
+        for batch in train_loader:
+            # 准备批次数据
+            batch_data = prepare_batch_data(batch, device)
+            (
+                batch_local_inputs,
+                batch_local_masks,
+                batch_local_targets,
+                batch_global_inputs,
+                batch_global_masks,
+                batch_global_targets,
+                metadata,
+            ) = batch_data
+            
+            # 使用自动混合精度
+            with torch.cuda.amp.autocast(enabled=True):
+                # 生成假样本
                 with torch.no_grad():
                     fake_outputs = model_cn(
                         batch_local_inputs,
@@ -984,185 +1004,164 @@ def train(resume_from=None):
                         batch_global_inputs,
                         batch_global_masks,
                     )
-
-                # Embed fake outputs into global inputs
+                
+                # 计算当前噪声水平 - 随着训练进展减少
+                noise_level = max(min_noise, start_noise * (1.0 - step / steps_2))
+                
+                # 应用实例噪声
+                batch_local_targets_noisy = batch_local_targets + torch.randn_like(batch_local_targets) * noise_level
+                fake_outputs_noisy = fake_outputs + torch.randn_like(fake_outputs) * noise_level
+                
+                # 嵌入假输出到全局
                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
-                    fake_outputs, batch_global_inputs, batch_global_masks, metadata
+                    fake_outputs_noisy, batch_global_inputs, batch_global_masks, metadata
                 )
-
-                # Train discriminator with fake samples
-                # fake_labels = torch.zeros(fake_outputs.size(0), 1).to(device)*0.05
-                fake_labels = torch.zeros(fake_outputs.size(0), 1).to(device)
+                
+                # 嵌入真实输入到全局
+                real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
+                    batch_local_targets_noisy, batch_global_inputs, batch_global_masks, metadata
+                )
+                
+                # 创建平滑标签
+                batch_size = batch_local_targets.size(0)
+                real_labels = torch.ones(batch_size, 1).to(device) * 0.9  # 标签平滑
+                fake_labels = torch.zeros(batch_size, 1).to(device) * 0.1  # 标签平滑
+                
+                # 训练判别器处理假样本
                 fake_predictions, fake_lf, fake_gf = model_cd(
-                    fake_outputs,
+                    fake_outputs_noisy,
                     batch_local_masks,
-                    fake_global_embedded, # 之前是batch_global_targets
+                    fake_global_embedded,
                     fake_global_mask_embedded,
                 )
-
-                # loss_fake = bce_loss(fake_predictions, fake_labels)
-                # loss_fake = F.mse_loss(fake_predictions, fake_labels)
-                loss_fake = weighted_bce_loss(fake_predictions, fake_labels)
-
-                # Embed real inputs into global inputs
-                real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
-                    batch_local_targets, batch_global_inputs, batch_global_masks, metadata
-                )
-
-                # Train discriminator with real samples
                 
-                real_labels = torch.ones(batch_local_targets.size(0), 1).to(device)
-                # real_labels = torch.ones_like(real_predictions, device=device, dtype=real_predictions.dtype)
+                # 训练判别器处理真实样本
                 real_predictions, real_lf, real_gf = model_cd(
-                    batch_local_targets,
-                    batch_local_masks,
-                    real_global_embedded, # 之前是batch_global_targets
-                    real_global_mask_embedded,
-                )
-                # loss_real = bce_loss(real_predictions, real_labels)
-                # loss_real = F.mse_loss(real_predictions, real_labels)
-                loss_real = weighted_bce_loss(real_predictions, real_labels)
-
-                # Combined loss
-                fm = feature_matching_loss(real_lf, real_gf, fake_lf, fake_gf)
-                loss = (loss_fake + loss_real) / 2.0 + fm*0.2
-                '''loss = wgan_gp_discriminator_loss(
-                    model_cd,
-                    batch_local_targets,
+                    batch_local_targets_noisy,
                     batch_local_masks,
                     real_global_embedded,
                     real_global_mask_embedded,
-                    fake_outputs,
-                    batch_local_masks,
-                    fake_global_embedded,
-                    fake_global_mask_embedded
-                )'''
-                print(f"loss_fake: {loss_fake.item()}, loss_real: {loss_real.item()}, matching loss: {fm.item()}")
-                
-                '''loss = balanced_discriminator_loss(
-                    real_predictions, fake_predictions, real_labels, fake_labels
-                )+feature_matching_loss(
-                    real_lf, real_gf, fake_lf, fake_gf)'''
-                
-
-                # Backward and optimize
-                loss.backward()
-                # torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 5.0)
-                opt_cd.step()
-                opt_cd.zero_grad()
-
-                # Update Visdom plot for discriminator loss
-                viz.line(
-                    Y=torch.tensor([loss.item()]),
-                    X=torch.tensor([step]),
-                    win=loss_windows["phase2_disc"],
-                    update="append",
                 )
-                 # 在每个snaperiod_2步保存检查点
-                if step % snaperiod_2 == 0:
-                    # 运行验证和可视化代码...
+                
+                # 使用BCEWithLogitsLoss代替BCE或自定义损失
+                loss_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)
+                loss_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)
+                
+                # 计算特征匹配损失
+                # 优化特征匹配，关注均值和方差
+                fm_weight = 0.01  # 使用较小的权重
+                
+                # 计算特征统计量
+                real_local_mean = real_lf.mean(0)
+                fake_local_mean = fake_lf.mean(0)
+                real_global_mean = real_gf.mean(0)
+                fake_global_mean = fake_gf.mean(0)
+                
+                real_local_std = torch.sqrt(real_lf.var(0) + 1e-8)
+                fake_local_std = torch.sqrt(fake_lf.var(0) + 1e-8)
+                real_global_std = torch.sqrt(real_gf.var(0) + 1e-8)
+                fake_global_std = torch.sqrt(fake_gf.var(0) + 1e-8)
+                
+                # 均值匹配 + 标准差匹配
+                fm_loss = (
+                    F.l1_loss(real_local_mean, fake_local_mean) +
+                    F.l1_loss(real_global_mean, fake_global_mean) +
+                    0.1 * F.l1_loss(real_local_std, fake_local_std) +
+                    0.1 * F.l1_loss(real_global_std, fake_global_std)
+                ) * fm_weight
+                
+                # 使用sigmoid计算预测概率，用于准确率计算
+                with torch.no_grad():
+                    real_probs = torch.sigmoid(real_predictions)
+                    fake_probs = torch.sigmoid(fake_predictions)
                     
-                    # 保存检查点
-                    save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 2, result_dir, best_acc=best_acc)
+                    real_acc = (real_probs >= 0.5).float().mean().item()
+                    fake_acc = (fake_probs < 0.5).float().mean().item()
+                    avg_acc = (real_acc + fake_acc) / 2
+                
+                # 动态调整损失权重，平衡训练
+                if real_acc < 0.3 and fake_acc > 0.7:
+                    # 真实样本识别困难，增加真实样本权重
+                    loss = loss_real * 5.0 + loss_fake * 0.5 + fm_loss
+                elif fake_acc < 0.3 and real_acc > 0.7:
+                    # 假样本识别困难，增加假样本权重
+                    loss = loss_real * 0.5 + loss_fake * 5.0 + fm_loss
+                else:
+                    # 相对平衡
+                    loss = loss_real + loss_fake + fm_loss
+            
+            # 使用梯度缩放器进行反向传播
+            scaler.scale(loss).backward()
+            
+            # 梯度裁剪
+            scaler.unscale_(opt_cd)
+            torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 1.0)
+            
+            # 更新参数
+            scaler.step(opt_cd)
+            scaler.update()
+            opt_cd.zero_grad(set_to_none=True)  # 更彻底地清理梯度
+            
+            # 更新学习率
+            scheduler.step()
+            
+            # 更新运行指标
+            running_loss += loss.item()
+            running_real_acc += real_acc
+            running_fake_acc += fake_acc
+            
+            # 定期打印详细统计信息
+            if step % 100 == 0:
+                avg_loss = running_loss / min(100, step - step_phase2 + 1)
+                avg_real_acc = running_real_acc / min(100, step - step_phase2 + 1)
+                avg_fake_acc = running_fake_acc / min(100, step - step_phase2 + 1)
+                
+                print(f"\n统计信息(最近100步):")
+                print(f"平均损失: {avg_loss:.4f}")
+                print(f"真实样本平均准确率: {avg_real_acc:.4f}")
+                print(f"虚假样本平均准确率: {avg_fake_acc:.4f}")
+                print(f"当前学习率: {scheduler.get_last_lr()[0]:.6f}")
+                print(f"当前噪声水平: {noise_level:.4f}")
+                print(f"真实样本预测分布: 均值={real_probs.mean().item():.4f}, 最小={real_probs.min().item():.4f}, 最大={real_probs.max().item():.4f}")
+                print(f"虚假样本预测分布: 均值={fake_probs.mean().item():.4f}, 最小={fake_probs.min().item():.4f}, 最大={fake_probs.max().item():.4f}")
+                
+                # 重置运行指标
+                running_loss = 0.0
+                running_real_acc = 0.0
+                running_fake_acc = 0.0
+            
+            # 更新进度条
+            current_lr = scheduler.get_last_lr()[0]
+            pbar.set_description(f"Phase 2 | loss: {loss.item():.4f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, lr: {current_lr:.1e}")
+            pbar.update(1)
+            
+            # Visdom可视化
+            viz.line(
+                Y=torch.tensor([loss.item()]),
+                X=torch.tensor([step]),
+                win=loss_windows["phase2_disc"],
+                update="append",
+            )
+            
+            viz.line(
+                Y=torch.tensor([avg_acc]),
+                X=torch.tensor([step]),
+                win=loss_windows["phase2_acc"],
+                update="append",
+            )
+            
+            step += 1
+            
+            # 在每个snaperiod_2步保存检查点和进行验证
+            if step % snaperiod_2 == 0:
+                # 评估判别器
+                model_cd.eval()
+                val_correct = 0
+                val_total = 0
 
-                step += 1
-                pbar.set_description(f"Phase 2 | train loss: {loss.item():.5f}")
-                pbar.update(1)
-
-                # Testing and saving snapshots
-                if step % snaperiod_2 == 0:
-                    # Calculate discriminator accuracy
-                    model_cd.eval()
-                    correct = 0
-                    total = 0
-
-                    with torch.no_grad():
-                        # Check on validation set
-                        for val_batch in val_subset_loader:
-                            # Prepare validation batch
-                            val_data = prepare_batch_data(val_batch, device)
-                            (
-                                val_local_inputs,
-                                val_local_masks,
-                                val_local_targets,
-                                val_global_inputs,
-                                val_global_masks,
-                                val_global_targets,
-                                metadata,
-                            ) = val_data
-
-                            # Generate fake samples
-                            fake_outputs = model_cn(
-                                val_local_inputs,
-                                val_local_masks,
-                                val_global_inputs,
-                                val_global_masks,
-                            )
-
-                            # Embed fake outputs into global inputs
-                            val_fake_global_embedded, val_fake_global_mask_embedded, _ = (
-                                merge_local_to_global(
-                                    fake_outputs,
-                                    val_global_inputs,
-                                    val_global_masks,
-                                    metadata,
-                                )
-                            )
-
-                            # Get discriminator predictions for fake samples
-                            fake_preds, fake_lf_preds, fake_gf_preds = model_cd(
-                                fake_outputs,
-                                val_local_masks,
-                                val_fake_global_embedded,
-                                val_fake_global_mask_embedded,
-                            )
-
-                            # Embed real inputs into global inputs
-                            val_real_global_embedded, val_real_global_mask_embedded, _ = (
-                                merge_local_to_global(
-                                    val_local_inputs,
-                                    val_global_inputs,
-                                    val_global_masks,
-                                    metadata,
-                                )
-                            )
-
-                            # Get discriminator predictions for real samples
-                            real_preds, real_lf_preds, real_gf_predss = model_cd(
-                                val_local_targets,
-                                val_local_masks,
-                                val_real_global_embedded,
-                                val_real_global_mask_embedded,
-                            )
-
-                            # Calculate accuracy
-                            total += fake_preds.size(0) * 2  # both real and fake samples
-                            correct += (
-                                (fake_preds < 0.5).sum() + (real_preds >= 0.5).sum()
-                            ).item()
-
-                    accuracy = correct / total if total > 0.5 else 0.5
-                    analyze_predictions_distribution(real_preds, fake_preds)
-                    # print(f"Step {step}, Discriminator Accuracy: {accuracy:.4f}, Fake Success: {(fake_preds<0.5).sum()} / {fake_preds.size(0)}, Real Success: {(real_preds>=0.5).sum()} / {real_preds.size(0)}")
-
-                    # Update Visdom plot for accuracy
-                    viz.line(
-                        Y=torch.tensor([accuracy]),
-                        X=torch.tensor([step]),
-                        win=loss_windows["phase2_acc"],
-                        update="append",
-                    )
-
-                    # Save model
-                    model_path = os.path.join(result_dir, "phase_2", f"model_cd_step{step}")
-                    torch.save(model_cd.state_dict(), model_path)
-
-                    # Visualize some samples
-                    with torch.no_grad():
-                        # Get a batch from validation set
-                        val_batch = next(iter(val_subset_loader))
-
-                        # Prepare validation batch
+                with torch.no_grad():
+                    for val_batch in val_subset_loader:
+                        # 准备验证批次
                         val_data = prepare_batch_data(val_batch, device)
                         (
                             val_local_inputs,
@@ -1171,42 +1170,128 @@ def train(resume_from=None):
                             val_global_inputs,
                             val_global_masks,
                             val_global_targets,
-                            metadata,
+                            val_metadata,
                         ) = val_data
 
-                        # Generate completions
-                        test_output = model_cn(
+                        # 生成假样本
+                        val_fake_outputs = model_cn(
                             val_local_inputs,
                             val_local_masks,
                             val_global_inputs,
                             val_global_masks,
                         )
-
-                        # Visualize results in Visdom (without completed global view for phase 2)
-                        visualize_results(
+                        
+                        # 嵌入
+                        val_fake_global_embedded, val_fake_global_mask_embedded, _ = merge_local_to_global(
+                            val_fake_outputs,
+                            val_global_inputs,
+                            val_global_masks,
+                            val_metadata,
+                        )
+                        
+                        val_real_global_embedded, val_real_global_mask_embedded, _ = merge_local_to_global(
                             val_local_targets,
-                            val_local_inputs,
-                            test_output,
-                            step=step,
-                            phase="phase_2",
+                            val_global_inputs,
+                            val_global_masks,
+                            val_metadata,
                         )
 
-                    # Save best model if accuracy improved
-                    if (
-                        accuracy > 0.75 and accuracy > best_acc
-                    ):  # Using accuracy threshold of 75%
-                        best_acc = accuracy
-                        best_model_path = os.path.join(
-                            result_dir, "phase_2", "model_cd_best"
+                        # 获取判别器预测
+                        val_fake_preds, _, _ = model_cd(
+                            val_fake_outputs,
+                            val_local_masks,
+                            val_fake_global_embedded,
+                            val_fake_global_mask_embedded,
                         )
-                        torch.save(model_cd.state_dict(), best_model_path)
+                        
+                        val_real_preds, _, _ = model_cd(
+                            val_local_targets,
+                            val_local_masks,
+                            val_real_global_embedded,
+                            val_real_global_mask_embedded,
+                        )
 
-                    model_cd.train()
-
-                if step >= steps_2:
-                    break
-
-        pbar.close()
+                        # 计算准确率
+                        val_total += val_fake_preds.size(0) * 2
+                        val_correct += (
+                            (val_fake_preds < 0.5).sum() + (val_real_preds >= 0.5).sum()
+                        ).item()
+                
+                val_accuracy = val_correct / val_total if val_total > 0 else 0.5
+                print(f"\n验证准确率: {val_accuracy:.4f}")
+                
+                # 检查是否有改进
+                if val_accuracy > best_acc:
+                    best_acc = val_accuracy
+                    best_model_path = os.path.join(result_dir, "phase_2", "model_cd_best")
+                    torch.save(model_cd.state_dict(), best_model_path)
+                    print(f"发现新的最佳模型，准确率: {val_accuracy:.4f}")
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    print(f"未见改善。耐心计数: {patience_counter}/{max_patience}")
+                    
+                    # 如果长时间没有改善，降低学习率
+                    if patience_counter >= max_patience:
+                        for param_group in opt_cd.param_groups:
+                            param_group['lr'] *= 0.5
+                        print(f"性能停滞，将学习率降低到: {opt_cd.param_groups[0]['lr']:.6f}")
+                        patience_counter = 0
+                
+                # 保存模型
+                model_path = os.path.join(result_dir, "phase_2", f"model_cd_step{step}")
+                torch.save(model_cd.state_dict(), model_path)
+                
+                '''# 可视化
+                with torch.no_grad():
+                    # 从验证集获取批次
+                    val_batch = next(iter(val_subset_loader))
+                    
+                    # 准备验证批次
+                    val_data = prepare_batch_data(val_batch, device)
+                    (
+                        val_local_inputs,
+                        val_local_masks,
+                        val_local_targets,
+                        val_global_inputs,
+                        val_global_masks,
+                        val_global_targets,
+                        val_metadata,
+                    ) = val_data
+                    
+                    # 生成输出
+                    test_output = model_cn(
+                        val_local_inputs,
+                        val_local_masks,
+                        val_global_inputs,
+                        val_global_masks,
+                    )
+                    
+                    # 可视化结果
+                    visualize_results(
+                        val_local_targets,
+                        val_local_inputs,
+                        test_output,
+                        step=step,
+                        phase="phase_2",
+                    )'''
+                
+                # 回到训练模式
+                model_cd.train()
+                
+                # 保存检查点
+                save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 2, result_dir, best_acc=best_acc)
+            
+            # 判断是否完成训练
+            if step >= steps_2:
+                break
+        
+        # 如果数据集遍历完而步数未达到，重置数据加载器
+        if step < steps_2:
+            print("重置数据加载器...")
+    
+    pbar.close()
+    print(f"Phase 2 训练完成! 最佳判别器准确率: {best_acc:.4f}")
 
     # =================================================
     # Training Phase 3: Joint training of both networks
