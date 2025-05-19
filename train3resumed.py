@@ -23,6 +23,7 @@ from DemDataset import DemDataset
 # Import the custom_collate_fn function from your dataset module
 from DemDataset import custom_collate_fn
 # from DEMData import custom_collate_fn
+from torch.cuda.amp import GradScaler, autocast
 
 import gc
 
@@ -132,7 +133,7 @@ def train(resume_from=None):
     )
     result_dir = r"F:\Dataset\Simulate\data0\result"  # 结果保存路径'''
 
-    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"  # 局部json
+    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
     array_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
     mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
     target_dir = (
@@ -158,6 +159,7 @@ def train(resume_from=None):
     if not torch.cuda.is_available():
         raise Exception("At least one GPU must be available.")
     device = torch.device("cuda:1")
+    #device = torch.device("cpu")
 
     # Initialize Visdom
     viz = visdom.Visdom(env="dem_completion")
@@ -296,7 +298,7 @@ def train(resume_from=None):
     else:
         if phase==2:
             # Load pre-trained weights if available
-            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_step100000"
+            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_best"
             if os.path.exists(pretrained_weights_path):
                 model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device))
                 print(f"Loaded pre-trained weights from {pretrained_weights_path}")
@@ -761,21 +763,27 @@ def train(resume_from=None):
     
 
 
-    # 采用加权BCE损失代替MSE
     def weighted_bce_loss(predictions, targets, pos_weight=2.0, neg_weight=2.0):
-            """加权二元交叉熵损失，对边界情况给予更大惩罚"""
-            eps = 1e-7
-            # 限制预测值，避免数值问题
-            predictions = torch.clamp(predictions, eps, 1 - eps)
-            
-            # 正例和负例损失计算
-            pos_loss = -targets * torch.log(predictions) * pos_weight
-            neg_loss = -(1 - targets) * torch.log(1 - predictions) * neg_weight
-            
-            # 每个样本损失
-            loss = pos_loss + neg_loss
-            
-            return loss.mean()
+        """改进的加权二元交叉熵损失，防止数值问题"""
+        # 使用更安全的epsilon值
+        eps = 1e-6
+        
+        # 使用更严格的clamp确保预测值在有效范围内
+        predictions = torch.clamp(predictions, eps, 1.0 - eps)
+        
+        # 使用更稳定的形式计算损失
+        pos_part = -targets * torch.log(predictions) * pos_weight
+        neg_part = -(1.0 - targets) * torch.log(1.0 - predictions) * neg_weight
+        
+        # 检查无效值并替换
+        pos_part = torch.where(torch.isnan(pos_part), torch.zeros_like(pos_part), pos_part)
+        neg_part = torch.where(torch.isnan(neg_part), torch.zeros_like(neg_part), neg_part)
+        
+        # 计算均值前检查总损失
+        loss = pos_part + neg_part
+        loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss)
+        
+        return loss.mean()
         
     def feature_matching_loss(real_local_feat, real_global_feat, fake_local_feat, fake_global_feat):
         """特征匹配损失，强制判别器学习区分特征"""
@@ -799,42 +807,37 @@ def train(resume_from=None):
                     fake_local_mask,
                     fake_global_data, 
                     fake_global_mask):
-        """
-        计算WGAN-GP的梯度惩罚项，适用于具有局部和全局输入的判别器
-        
-        参数:
-            discriminator: 判别器模型
-            real_local_data: 真实局部样本
-            real_local_mask: 真实局部掩码
-            real_global_data: 真实全局样本
-            real_global_mask: 真实全局掩码
-            fake_local_data: 生成的局部样本
-            fake_local_mask: 生成的局部掩码
-            fake_global_data: 生成的全局样本
-            fake_global_mask: 生成的全局掩码
-            
-        返回:
-            gp: 梯度惩罚值
-        """
+        """内存效率更高的梯度惩罚计算"""
         batch_size = real_local_data.size(0)
         
-        # 创建插值系数，形状为 [batch_size, 1, 1, 1]
-        alpha = torch.rand(batch_size, 1, 1, 1, device=real_local_data.device)
+        # 只使用较小的批量计算梯度惩罚
+        max_samples = min(batch_size, 4)  # 一次最多处理4个样本
         
-        # 创建局部和全局数据的插值样本
-        interpolates_local = alpha * real_local_data + (1 - alpha) * fake_local_data
-        interpolates_global = alpha * real_global_data + (1 - alpha) * fake_global_data
+        # 随机选择样本
+        indices = torch.randperm(batch_size)[:max_samples]
         
-        # 对掩码也进行相同的插值（如果掩码是二值的，可能需要四舍五入或二值化）
-        # 对于二值掩码，我们可以使用相同的 alpha 进行插值，然后四舍五入
-        interpolates_local_mask = (alpha * real_local_mask + (1 - alpha) * fake_local_mask).round()
-        interpolates_global_mask = (alpha * real_global_mask + (1 - alpha) * fake_global_mask).round()
+        real_local_sample = real_local_data[indices]
+        real_local_mask_sample = real_local_mask[indices]
+        real_global_sample = real_global_data[indices]
+        real_global_mask_sample = real_global_mask[indices]
         
-        # 确保插值样本需要梯度
+        fake_local_sample = fake_local_data[indices]
+        fake_local_mask_sample = fake_local_mask[indices]  
+        fake_global_sample = fake_global_data[indices]
+        fake_global_mask_sample = fake_global_mask[indices]
+        
+        # 以下计算与原始函数相同，但使用较小的样本
+        alpha = torch.rand(max_samples, 1, 1, 1, device=real_local_data.device)
+        
+        interpolates_local = alpha * real_local_sample + (1 - alpha) * fake_local_sample
+        interpolates_global = alpha * real_global_sample + (1 - alpha) * fake_global_sample
+        
+        interpolates_local_mask = (alpha * real_local_mask_sample + (1 - alpha) * fake_local_mask_sample).round()
+        interpolates_global_mask = (alpha * real_global_mask_sample + (1 - alpha) * fake_global_mask_sample).round()
+        
         interpolates_local.requires_grad_(True)
         interpolates_global.requires_grad_(True)
         
-        # 计算判别器对插值样本的输出
         d_interpolates, _, _ = discriminator(
             interpolates_local, 
             interpolates_local_mask, 
@@ -842,10 +845,8 @@ def train(resume_from=None):
             interpolates_global_mask
         )
         
-        # 创建梯度的目标张量
         fake = torch.ones(d_interpolates.size(), device=real_local_data.device)
         
-        # 计算梯度 - 对于多个输入，我们需要获取所有输入的梯度
         gradients = torch.autograd.grad(
             outputs=d_interpolates,
             inputs=[interpolates_local, interpolates_global],
@@ -855,15 +856,12 @@ def train(resume_from=None):
             only_inputs=True,
         )
         
-        # 分别处理局部和全局梯度
-        gradients_local = gradients[0].view(batch_size, -1)
-        gradients_global = gradients[1].view(batch_size, -1)
+        gradients_local = gradients[0].view(max_samples, -1)
+        gradients_global = gradients[1].view(max_samples, -1)
         
-        # 将所有梯度拼接起来计算总范数
         gradients_all = torch.cat([gradients_local, gradients_global], dim=1)
         gradient_norm = gradients_all.norm(2, dim=1)
         
-        # 计算梯度惩罚 (梯度范数-1)^2
         gradient_penalty = ((gradient_norm - 1) ** 2).mean()
         
         return gradient_penalty
@@ -931,13 +929,13 @@ def train(resume_from=None):
         print(f"虚假样本在阈值(0.45-0.55)附近的比例: {fake_near_threshold:.2%}")
         
         # 检查是否存在对称模式
-        real_below = np.sum(real_vals < 0) / len(real_vals)
-        real_above = np.sum(real_vals > 0) / len(real_vals)
-        fake_below = np.sum(fake_vals < 0) / len(fake_vals)
-        fake_above = np.sum(fake_vals > 0) / len(fake_vals)
+        real_below = np.sum(real_vals < 0.5) / len(real_vals)
+        real_above = np.sum(real_vals > 0.5) / len(real_vals)
+        fake_below = np.sum(fake_vals < 0.5) / len(fake_vals)
+        fake_above = np.sum(fake_vals > 0.5) / len(fake_vals)
         
-        print(f"真实样本分布: <0占{real_below:.2%}, >0占{real_above:.2%}")
-        print(f"虚假样本分布: <0占{fake_below:.2%}, >0占{fake_above:.2%}")
+        print(f"真实样本分布: <0.5占{real_below:.2%}, >0.5占{real_above:.2%}")
+        print(f"虚假样本分布: <0.5占{fake_below:.2%}, >0.5占{fake_above:.2%}")
         
         # 检查是否刚好出现互补模式
         complement_ratio = (real_above + fake_below) / 2
@@ -957,6 +955,7 @@ def train(resume_from=None):
     pbar = tqdm(total=steps_2)
     step = 0'''
     best_acc = float("-inf")
+    
 
     if step_phase2 < steps_2 or phase == 2:
         print("开始/继续第2阶段训练...")
@@ -993,17 +992,16 @@ def train(resume_from=None):
 
                 # Train discriminator with fake samples
                 # fake_labels = torch.zeros(fake_outputs.size(0), 1).to(device)*0.05
-                fake_labels = - torch.ones(fake_outputs.size(0), 1).to(device)
+                fake_labels = torch.zeros(fake_outputs.size(0), 1).to(device)
                 fake_predictions, fake_lf, fake_gf = model_cd(
                     fake_outputs,
                     batch_local_masks,
                     fake_global_embedded, # 之前是batch_global_targets
                     fake_global_mask_embedded,
                 )
+
                 # loss_fake = bce_loss(fake_predictions, fake_labels)
                 # loss_fake = F.mse_loss(fake_predictions, fake_labels)
-                 # 使用
-                
                 loss_fake = weighted_bce_loss(fake_predictions, fake_labels)
 
                 # Embed real inputs into global inputs
@@ -1012,7 +1010,9 @@ def train(resume_from=None):
                 )
 
                 # Train discriminator with real samples
+                
                 real_labels = torch.ones(batch_local_targets.size(0), 1).to(device)
+                # real_labels = torch.ones_like(real_predictions, device=device, dtype=real_predictions.dtype)
                 real_predictions, real_lf, real_gf = model_cd(
                     batch_local_targets,
                     batch_local_masks,
@@ -1025,8 +1025,8 @@ def train(resume_from=None):
 
                 # Combined loss
                 fm = feature_matching_loss(real_lf, real_gf, fake_lf, fake_gf)
-                # loss = (loss_fake + loss_real) / 2.0 + fm
-                loss = wgan_gp_discriminator_loss(
+                loss = (loss_fake + loss_real) / 2.0 + fm*0.2
+                '''loss = wgan_gp_discriminator_loss(
                     model_cd,
                     batch_local_targets,
                     batch_local_masks,
@@ -1036,8 +1036,8 @@ def train(resume_from=None):
                     batch_local_masks,
                     fake_global_embedded,
                     fake_global_mask_embedded
-                )
-                # print(f"loss_fake: {loss_fake.item()}, loss_real: {loss_real.item()}, matching loss: {fm.item()}")
+                )'''
+                print(f"loss_fake: {loss_fake.item()}, loss_real: {loss_real.item()}, matching loss: {fm.item()}")
                 
                 '''loss = balanced_discriminator_loss(
                     real_predictions, fake_predictions, real_labels, fake_labels
@@ -1047,7 +1047,7 @@ def train(resume_from=None):
 
                 # Backward and optimize
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 5.0)
+                # torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 5.0)
                 opt_cd.step()
                 opt_cd.zero_grad()
 
@@ -1138,12 +1138,12 @@ def train(resume_from=None):
                             # Calculate accuracy
                             total += fake_preds.size(0) * 2  # both real and fake samples
                             correct += (
-                                (fake_preds < 0).sum() + (real_preds >= 0).sum()
+                                (fake_preds < 0.5).sum() + (real_preds >= 0.5).sum()
                             ).item()
 
-                    accuracy = correct / total if total > 0 else 0
+                    accuracy = correct / total if total > 0.5 else 0.5
                     analyze_predictions_distribution(real_preds, fake_preds)
-                    print(f"Step {step}, Discriminator Accuracy: {accuracy:.4f}, Fake Success: {(fake_preds<0).sum()} / {fake_preds.size(0)}, Real Success: {(real_preds>=0).sum()} / {real_preds.size(0)}")
+                    # print(f"Step {step}, Discriminator Accuracy: {accuracy:.4f}, Fake Success: {(fake_preds<0.5).sum()} / {fake_preds.size(0)}, Real Success: {(real_preds>=0.5).sum()} / {real_preds.size(0)}")
 
                     # Update Visdom plot for accuracy
                     viz.line(
