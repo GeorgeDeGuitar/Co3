@@ -913,10 +913,10 @@ class ContextDiscriminator(nn.Module):
 
         # 分类器
         self.classifier = nn.Sequential(
-            nn.Linear(1024 + 1024, 1),
+            nn.Linear(1024 + 1024, 512),
             # nn.LeakyReLU(0.2, inplace=True),
-            # nn.Linear(512, 1),
-            nn.Sigmoid(),
+            nn.Linear(512, 1),
+            # nn.Sigmoid(),
         )
 
     def forward(self, x_ld, x_lm, x_gd, x_gm):
