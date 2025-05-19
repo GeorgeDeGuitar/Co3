@@ -132,7 +132,7 @@ def train(resume_from=None):
     )
     result_dir = r"F:\Dataset\Simulate\data0\result"  # 结果保存路径'''
 
-    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
+    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"  # 局部json
     array_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
     mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
     target_dir = (
