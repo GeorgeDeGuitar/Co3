@@ -785,18 +785,19 @@ def train(resume_from=None):
         
         return loss.mean()
         
-    def feature_matching_loss(real_local_feat, real_global_feat, fake_local_feat, fake_global_feat):
+    def feature_matching_loss(real_local_feat, real_global_feat, fake_local_feat, fake_global_feat, real_predict, fake_predict):
         """特征匹配损失，强制判别器学习区分特征"""
         
         # 计算特征距离
-        local_distance = F.l1_loss(real_local_feat.mean(0), fake_local_feat.mean(0))
-        global_distance = F.l1_loss(real_global_feat.mean(0), fake_global_feat.mean(0))
-        print(f"local distance: {local_distance}, global_distance: {global_distance}")
+        local_distance = real_local_feat.mean(0)-fake_local_feat.mean(0)
+        global_distance = real_global_feat.mean(0)-fake_global_feat.mean(0)
+        predict_distance = real_predict.mean(0)-fake_predict.mean(0)
+        # print(f"local distance: {local_distance}, global_distance: {global_distance}")
         
         # 我们希望特征具有区分性，因此损失需要优化
         target_distance = torch.tensor(0.5, device=device)  # 希望特征有一定差距
         
-        return F.mse_loss(local_distance, target_distance) + F.mse_loss(global_distance, target_distance)
+        return F.mse_loss(local_distance, target_distance) + F.mse_loss(global_distance, target_distance)+ F.mse_loss(predict_distance, target_distance)
     
     def gradient_penalty(discriminator, 
                     real_local_data, 
@@ -995,7 +996,7 @@ def train(resume_from=None):
             ) = batch_data
             
             # 使用自动混合精度
-            with torch.cuda.amp.autocast(enabled=True):
+            with autocast(device_type=device.type, dtype=torch.float32, enabled=True):
                 # 生成假样本
                 with torch.no_grad():
                     fake_outputs = model_cn(
@@ -1024,8 +1025,8 @@ def train(resume_from=None):
                 
                 # 创建平滑标签
                 batch_size = batch_local_targets.size(0)
-                real_labels = torch.ones(batch_size, 1).to(device) * 0.9  # 标签平滑
-                fake_labels = torch.zeros(batch_size, 1).to(device) * 0.1  # 标签平滑
+                real_labels = torch.ones(batch_size, 1).to(device)   # 标签平滑
+                fake_labels = torch.zeros(batch_size, 1).to(device)   # 标签平滑
                 
                 # 训练判别器处理假样本
                 fake_predictions, fake_lf, fake_gf = model_cd(
@@ -1049,7 +1050,7 @@ def train(resume_from=None):
                 
                 # 计算特征匹配损失
                 # 优化特征匹配，关注均值和方差
-                fm_weight = 0.01  # 使用较小的权重
+                fm_weight = 2  # 使用较小的权重
                 
                 # 计算特征统计量
                 real_local_mean = real_lf.mean(0)
@@ -1063,12 +1064,14 @@ def train(resume_from=None):
                 fake_global_std = torch.sqrt(fake_gf.var(0) + 1e-8)
                 
                 # 均值匹配 + 标准差匹配
-                fm_loss = (
+                '''fm_loss = (
                     F.l1_loss(real_local_mean, fake_local_mean) +
                     F.l1_loss(real_global_mean, fake_global_mean) +
                     0.1 * F.l1_loss(real_local_std, fake_local_std) +
                     0.1 * F.l1_loss(real_global_std, fake_global_std)
-                ) * fm_weight
+                ) * fm_weight'''
+                fm_loss = feature_matching_loss(
+                    real_lf, real_gf, fake_lf, fake_gf, real_predictions, fake_predictions)* fm_weight
                 
                 # 使用sigmoid计算预测概率，用于准确率计算
                 with torch.no_grad():
@@ -1078,17 +1081,23 @@ def train(resume_from=None):
                     real_acc = (real_probs >= 0.5).float().mean().item()
                     fake_acc = (fake_probs < 0.5).float().mean().item()
                     avg_acc = (real_acc + fake_acc) / 2
-                
-                # 动态调整损失权重，平衡训练
-                if real_acc < 0.3 and fake_acc > 0.7:
+    
+                '''# 动态调整损失权重，平衡训练
+                if real_acc < 0.1 and fake_acc > 0.9:
                     # 真实样本识别困难，增加真实样本权重
-                    loss = loss_real * 5.0 + loss_fake * 0.5 + fm_loss
-                elif fake_acc < 0.3 and real_acc > 0.7:
+                    loss_real *= 5.0 
+                    loss_fake *= 0.5
+                    print("loss real weight strengthened")
+                elif fake_acc < 0.1 and real_acc > 0.9:
                     # 假样本识别困难，增加假样本权重
-                    loss = loss_real * 0.5 + loss_fake * 5.0 + fm_loss
-                else:
+                    loss_real *= 0.5 
+                    loss_fake *= 5.0
+                    print("loss fake weight strengthened")'''
+                # else:
                     # 相对平衡
-                    loss = loss_real + loss_fake + fm_loss
+                    # loss = loss_real + loss_fake + fm_loss
+                loss = loss_real + loss_fake + fm_loss
+                print(f"loss_real: {loss_real}, loss_fake: {loss_fake}, fm_loss: {fm_loss}")
             
             # 使用梯度缩放器进行反向传播
             scaler.scale(loss).backward()
