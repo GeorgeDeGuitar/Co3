@@ -1228,7 +1228,7 @@ def train(resume_from=None):
                         val_correct += (
                             (val_fake_preds < 0.5).sum() + (val_real_preds >= 0.5).sum()
                         ).item()
-                        print(f"validation: fake_preds: {val_fake_preds}/{val_fake_preds.size(0)}, real_preds: {val_real_preds}/{val_real_preds.size(0)}")
+                        print(f"validation: fake_preds: {(val_fake_preds<0.5).sum()}/{val_fake_preds.size(0)}, real_preds: {(val_real_preds>0.5).sum()}/{val_real_preds.size(0)}")
                 
                 val_accuracy = val_correct / val_total
                 print(f"\n验证准确率: {val_accuracy:.4f}")
