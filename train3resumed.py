@@ -148,7 +148,7 @@ def train(resume_from=None):
     steps_3 = 200000  # 400000  # Phase 3 training steps
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
-    snaperiod_2 = 200 # 2000  # How often to save snapshots in phase 2
+    snaperiod_2 = 500 # 2000  # How often to save snapshots in phase 2
     snaperiod_3 = 500   # 10000  # How often to save snapshots in phase 3
 
     batch_size = 8  # Batch size
@@ -1034,8 +1034,8 @@ def train(resume_from=None):
                 
                 # 创建平滑标签
                 batch_size = batch_local_targets.size(0)
-                real_labels = torch.ones(batch_size, 1).to(device)   # 标签平滑
-                fake_labels = torch.zeros(batch_size, 1).to(device)   # 标签平滑
+                real_labels = torch.ones(batch_size, 1).to(device)*0.95   # 标签平滑
+                fake_labels = torch.zeros(batch_size, 1).to(device)*0.05   # 标签平滑
                 
                 # 训练判别器处理假样本
                 fake_predictions, fake_lf, fake_gf = model_cd(
@@ -1059,11 +1059,21 @@ def train(resume_from=None):
                 
                 # 计算特征匹配损失
                 # 优化特征匹配，关注均值和方差
-                fm_weight = 1e-5  # 使用较小的权重
+                fm_weight = 1e-2  # 使用较小的权重
                 
 
                 fm_loss = feature_contrastive_loss(
                     real_lf, real_gf, fake_lf, fake_gf)* fm_weight
+                
+                gp_loss = gradient_penalty(model_cd, 
+                    batch_local_targets_noisy, 
+                    batch_local_masks, 
+                    real_global_embedded, 
+                    real_global_mask_embedded, 
+                    fake_outputs_noisy, 
+                    batch_local_masks,
+                    fake_global_embedded,
+                    fake_global_mask_embedded)
                 
                 # 使用sigmoid计算预测概率，用于准确率计算
                 with torch.no_grad():
@@ -1088,8 +1098,8 @@ def train(resume_from=None):
                 # else:
                     # 相对平衡
                     # loss = loss_real + loss_fake + fm_loss
-                loss = loss_real + loss_fake + fm_loss
-                print(f"loss_real: {loss_real}, loss_fake: {loss_fake}, fm_loss: {fm_loss}")
+                loss = loss_real + loss_fake + fm_loss + gp_loss
+                print(f"loss_real: {loss_real}, loss_fake: {loss_fake}, fm_loss: {fm_loss}, gp_loss: {gp_loss}")
             
             # 使用梯度缩放器进行反向传播
             scaler.scale(loss).backward()
