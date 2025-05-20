@@ -133,7 +133,7 @@ def train(resume_from=None):
     )
     result_dir = r"F:\Dataset\Simulate\data0\result"  # 结果保存路径'''
 
-    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"  # 局部json
+    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
     array_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
     mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
     target_dir = (
@@ -1352,7 +1352,7 @@ def train(resume_from=None):
                     fake_global_embedded,
                     fake_global_mask_embedded,
                 )
-                loss_cd_fake = bce_loss(fake_predictions, fake_labels)
+                loss_cd_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)
 
                 # Train discriminator with real samples
                 real_labels = torch.ones(batch_local_targets.size(0), 1).to(device)
@@ -1368,7 +1368,7 @@ def train(resume_from=None):
                     real_global_embedded,
                     real_global_mask_embedded,
                 )
-                loss_cd_real = bce_loss(real_predictions, real_labels)
+                loss_cd_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)
 
                 # Combined discriminator loss
                 loss_cd = (loss_cd_fake + loss_cd_real) * alpha / 2.0
