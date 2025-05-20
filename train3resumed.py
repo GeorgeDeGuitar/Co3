@@ -144,7 +144,7 @@ def train(resume_from=None):
 
     # Training parameters
     steps_1 = 100000  # 90000  # Phase 1 training steps
-    steps_2 = 200000  # 10000  # Phase 2 training steps
+    steps_2 = 50000  # 10000  # Phase 2 training steps
     steps_3 = 200000  # 400000  # Phase 3 training steps
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
@@ -966,10 +966,6 @@ def train(resume_from=None):
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-6)
     
-    # 实例噪声初始值和最小值
-    start_noise = 0.1
-    min_noise = 0.001
-    
     # 跟踪性能指标
     running_loss = 0.0
     running_real_acc = 0.0
@@ -1004,23 +1000,16 @@ def train(resume_from=None):
                         batch_local_masks,
                         batch_global_inputs,
                         batch_global_masks,
-                    )
-                
-                # 计算当前噪声水平 - 随着训练进展减少
-                noise_level = max(min_noise, start_noise * (1.0 - step / steps_2))
-                
-                # 应用实例噪声
-                batch_local_targets_noisy = batch_local_targets + torch.randn_like(batch_local_targets) * noise_level
-                fake_outputs_noisy = fake_outputs + torch.randn_like(fake_outputs) * noise_level
+                    )              
                 
                 # 嵌入假输出到全局
                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
-                    fake_outputs_noisy, batch_global_inputs, batch_global_masks, metadata
+                    fake_outputs, batch_global_inputs, batch_global_masks, metadata
                 )
                 
                 # 嵌入真实输入到全局
                 real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
-                    batch_local_targets_noisy, batch_global_inputs, batch_global_masks, metadata
+                    batch_local_targets, batch_global_inputs, batch_global_masks, metadata
                 )
                 
                 # 创建平滑标签
@@ -1030,7 +1019,7 @@ def train(resume_from=None):
                 
                 # 训练判别器处理假样本
                 fake_predictions, fake_lf, fake_gf = model_cd(
-                    fake_outputs_noisy,
+                    fake_outputs,
                     batch_local_masks,
                     fake_global_embedded,
                     fake_global_mask_embedded,
@@ -1038,7 +1027,7 @@ def train(resume_from=None):
                 
                 # 训练判别器处理真实样本
                 real_predictions, real_lf, real_gf = model_cd(
-                    batch_local_targets_noisy,
+                    batch_local_targets,
                     batch_local_masks,
                     real_global_embedded,
                     real_global_mask_embedded,
@@ -1052,31 +1041,14 @@ def train(resume_from=None):
                 # 优化特征匹配，关注均值和方差
                 fm_weight = 2  # 使用较小的权重
                 
-                # 计算特征统计量
-                real_local_mean = real_lf.mean(0)
-                fake_local_mean = fake_lf.mean(0)
-                real_global_mean = real_gf.mean(0)
-                fake_global_mean = fake_gf.mean(0)
-                
-                real_local_std = torch.sqrt(real_lf.var(0) + 1e-8)
-                fake_local_std = torch.sqrt(fake_lf.var(0) + 1e-8)
-                real_global_std = torch.sqrt(real_gf.var(0) + 1e-8)
-                fake_global_std = torch.sqrt(fake_gf.var(0) + 1e-8)
-                
-                # 均值匹配 + 标准差匹配
-                '''fm_loss = (
-                    F.l1_loss(real_local_mean, fake_local_mean) +
-                    F.l1_loss(real_global_mean, fake_global_mean) +
-                    0.1 * F.l1_loss(real_local_std, fake_local_std) +
-                    0.1 * F.l1_loss(real_global_std, fake_global_std)
-                ) * fm_weight'''
+
                 fm_loss = feature_matching_loss(
                     real_lf, real_gf, fake_lf, fake_gf, real_predictions, fake_predictions)* fm_weight
                 
                 # 使用sigmoid计算预测概率，用于准确率计算
                 with torch.no_grad():
-                    real_probs = torch.sigmoid(real_predictions)
-                    fake_probs = torch.sigmoid(fake_predictions)
+                    real_probs = real_predictions
+                    fake_probs = fake_predictions
                     
                     real_acc = (real_probs >= 0.5).float().mean().item()
                     fake_acc = (fake_probs < 0.5).float().mean().item()
@@ -1130,7 +1102,6 @@ def train(resume_from=None):
                 print(f"真实样本平均准确率: {avg_real_acc:.4f}")
                 print(f"虚假样本平均准确率: {avg_fake_acc:.4f}")
                 print(f"当前学习率: {scheduler.get_last_lr()[0]:.6f}")
-                print(f"当前噪声水平: {noise_level:.4f}")
                 print(f"真实样本预测分布: 均值={real_probs.mean().item():.4f}, 最小={real_probs.min().item():.4f}, 最大={real_probs.max().item():.4f}")
                 print(f"虚假样本预测分布: 均值={fake_probs.mean().item():.4f}, 最小={fake_probs.min().item():.4f}, 最大={fake_probs.max().item():.4f}")
                 

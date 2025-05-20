@@ -862,7 +862,7 @@ class ContextDiscriminator(nn.Module):
             logits = torch.zeros_like(logits, device=logits.device)
 
         # 为了与原代码兼容，返回sigmoid值和特征
-        return logits, x_ld, x_gd
+        return torch.sigmoid(logits), x_ld, x_gd
     
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
