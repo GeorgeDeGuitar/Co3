@@ -473,8 +473,12 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
         slope = torch.clamp(slope, min=0.0, max=10.0)
         curvature = torch.clamp(curvature, min=-5.0, max=5.0)
         
+        # 合并特征时应用dropout
+        features = torch.cat([x, slope, aspect, curvature, normal_x, normal_y, normal_z], dim=1)
+        features = F.dropout(features, p=0.1, training=self.training)
+        
         # 返回所有地形特征：原始高程 + 坡度 + 坡向 + 曲率 + 法线(x,y,z)
-        return torch.cat([x, slope, aspect, curvature, normal_x, normal_y, normal_z], dim=1)
+        return features
 
 
 class StabilizedSelfAttention(nn.Module):
@@ -758,7 +762,13 @@ class GlobalDiscriminator(nn.Module):
         current_mask = F.interpolate(current_mask, scale_factor=0.5, mode='nearest')
         
         # 第四层卷积
-        x = self.conv4(x, current_mask)
+        # 第四层卷积 - 添加判断
+        if hasattr(self.conv4, 'forward') and self.conv4.forward.__code__.co_argcount == 3:
+            # 如果是DisGatedConv2d
+            x = self.conv4(x, current_mask)
+        else:
+            # 如果是普通Conv2d
+            x = self.conv4(x)
         x = self.bn4(x)
         x = self.act4(x)
         # 更新掩码尺寸
@@ -808,6 +818,8 @@ class ContextDiscriminator(nn.Module):
         global_input_size=600,
     ):
         super(ContextDiscriminator, self).__init__()
+        
+        
 
         # 创建增强版局部判别器和全局判别器
         self.model_ld = LocalDiscriminator(
@@ -816,6 +828,11 @@ class ContextDiscriminator(nn.Module):
         self.model_gd = GlobalDiscriminator(
             input_channels=global_input_channels, input_size=global_input_size
         )
+        
+        # 权重共享
+        shared_conv = spectral_norm(nn.Conv2d(256, 512, kernel_size=5, stride=2, padding=2))
+        self.model_ld.conv4 = shared_conv
+        self.model_gd.conv4 = shared_conv
 
         # 扁平化层
         self.flatten_ld = nn.Flatten()
@@ -825,7 +842,7 @@ class ContextDiscriminator(nn.Module):
         self.fusion = nn.Sequential(
             spectral_norm(nn.Linear(1024 + 1024, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3)  # 增加dropout以提高正则化
+            nn.Dropout(0.5)  # 增加dropout以提高正则化
         )
 
         # 分类器 - 不使用sigmoid激活，直接输出logits，适配BCEWithLogitsLoss
@@ -862,13 +879,13 @@ class ContextDiscriminator(nn.Module):
             logits = torch.zeros_like(logits, device=logits.device)
 
         # 为了与原代码兼容，返回sigmoid值和特征
-        return torch.sigmoid(logits), x_ld, x_gd
+        return logits, x_ld, x_gd
     
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test = 1
+    test = 2
     # Remove the "logs" folder if it exists
-    logs_path = "logsld"
+    logs_path = "logsgd"
     if os.path.exists(logs_path):
         shutil.rmtree(logs_path)
 
@@ -896,7 +913,7 @@ if __name__ == "__main__":
             input1 = torch.ones(1, 1, 600, 600)
 
             input1 = input1.to(device)
-            writer = SummaryWriter("logs")
+            writer = SummaryWriter("logsgd")
             writer.add_graph(gd, [input1, input1])
             writer.close()
 

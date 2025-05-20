@@ -133,7 +133,7 @@ def train(resume_from=None):
     )
     result_dir = r"F:\Dataset\Simulate\data0\result"  # 结果保存路径'''
 
-    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
+    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"  # 局部json
     array_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
     mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
     target_dir = (
@@ -148,7 +148,7 @@ def train(resume_from=None):
     steps_3 = 200000  # 400000  # Phase 3 training steps
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
-    snaperiod_2 = 500 # 2000  # How often to save snapshots in phase 2
+    snaperiod_2 = 200 # 2000  # How often to save snapshots in phase 2
     snaperiod_3 = 500   # 10000  # How often to save snapshots in phase 3
 
     batch_size = 8  # Batch size
@@ -785,19 +785,27 @@ def train(resume_from=None):
         
         return loss.mean()
         
-    def feature_matching_loss(real_local_feat, real_global_feat, fake_local_feat, fake_global_feat, real_predict, fake_predict):
-        """特征匹配损失，强制判别器学习区分特征"""
+    def feature_contrastive_loss(real_local_feat, real_global_feat, fake_local_feat, fake_global_feat):
+        """特征对比损失 - 鼓励真假样本特征分离"""
         
-        # 计算特征距离
-        local_distance = real_local_feat.mean(0)-fake_local_feat.mean(0)
-        global_distance = real_global_feat.mean(0)-fake_global_feat.mean(0)
-        predict_distance = real_predict.mean(0)-fake_predict.mean(0)
-        # print(f"local distance: {local_distance}, global_distance: {global_distance}")
+        # 计算真假特征均值
+        real_local_mean = real_local_feat.mean(0)
+        fake_local_mean = fake_local_feat.mean(0)
+        real_global_mean = real_global_feat.mean(0)
+        fake_global_mean = fake_global_feat.mean(0)
         
-        # 我们希望特征具有区分性，因此损失需要优化
-        target_distance = torch.tensor(0.5, device=device)  # 希望特征有一定差距
+        # 计算欧氏距离
+        local_distance = torch.sqrt(torch.sum((real_local_mean - fake_local_mean)**2) + 1e-6)
+        global_distance = torch.sqrt(torch.sum((real_global_mean - fake_global_mean)**2) + 1e-6)
         
-        return F.mse_loss(local_distance, target_distance) + F.mse_loss(global_distance, target_distance)+ F.mse_loss(predict_distance, target_distance)
+        # 或使用 pairwise_distance
+        # local_distance = F.pairwise_distance(real_local_mean.unsqueeze(0), fake_local_mean.unsqueeze(0)).mean()
+        # global_distance = F.pairwise_distance(real_global_mean.unsqueeze(0), fake_global_mean.unsqueeze(0)).mean()
+        
+        # 对比损失 - 我们希望最大化距离（所以使用负号）
+        contrastive_loss = -(local_distance + global_distance)
+        
+        return contrastive_loss
     
     def gradient_penalty(discriminator, 
                     real_local_data, 
@@ -966,6 +974,10 @@ def train(resume_from=None):
     from torch.optim.lr_scheduler import CosineAnnealingLR
     scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-6)
     
+    # 实例噪声初始值和最小值
+    start_noise = 0.1
+    min_noise = 0.001
+    
     # 跟踪性能指标
     running_loss = 0.0
     running_real_acc = 0.0
@@ -1002,14 +1014,22 @@ def train(resume_from=None):
                         batch_global_masks,
                     )              
                 
+                # 计算当前噪声水平 - 随着训练进展减少
+                noise_level = max(min_noise, start_noise * (1.0 - step / steps_2))
+                
+                # 应用实例噪声
+                batch_local_targets_noisy = batch_local_targets + torch.randn_like(batch_local_targets) * noise_level
+                fake_outputs_noisy = fake_outputs + torch.randn_like(fake_outputs) * noise_level
+                
+                
                 # 嵌入假输出到全局
                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
-                    fake_outputs, batch_global_inputs, batch_global_masks, metadata
+                    fake_outputs_noisy, batch_global_inputs, batch_global_masks, metadata
                 )
                 
                 # 嵌入真实输入到全局
                 real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
-                    batch_local_targets, batch_global_inputs, batch_global_masks, metadata
+                    batch_local_targets_noisy, batch_global_inputs, batch_global_masks, metadata
                 )
                 
                 # 创建平滑标签
@@ -1019,7 +1039,7 @@ def train(resume_from=None):
                 
                 # 训练判别器处理假样本
                 fake_predictions, fake_lf, fake_gf = model_cd(
-                    fake_outputs,
+                    fake_outputs_noisy,
                     batch_local_masks,
                     fake_global_embedded,
                     fake_global_mask_embedded,
@@ -1027,7 +1047,7 @@ def train(resume_from=None):
                 
                 # 训练判别器处理真实样本
                 real_predictions, real_lf, real_gf = model_cd(
-                    batch_local_targets,
+                    batch_local_targets_noisy,
                     batch_local_masks,
                     real_global_embedded,
                     real_global_mask_embedded,
@@ -1039,16 +1059,16 @@ def train(resume_from=None):
                 
                 # 计算特征匹配损失
                 # 优化特征匹配，关注均值和方差
-                fm_weight = 2  # 使用较小的权重
+                fm_weight = 1e-5  # 使用较小的权重
                 
 
-                fm_loss = feature_matching_loss(
-                    real_lf, real_gf, fake_lf, fake_gf, real_predictions, fake_predictions)* fm_weight
+                fm_loss = feature_contrastive_loss(
+                    real_lf, real_gf, fake_lf, fake_gf)* fm_weight
                 
                 # 使用sigmoid计算预测概率，用于准确率计算
                 with torch.no_grad():
-                    real_probs = real_predictions
-                    fake_probs = fake_predictions
+                    real_probs = torch.sigmoid(real_predictions)
+                    fake_probs = torch.sigmoid(fake_predictions)
                     
                     real_acc = (real_probs >= 0.5).float().mean().item()
                     fake_acc = (fake_probs < 0.5).float().mean().item()
@@ -1076,7 +1096,7 @@ def train(resume_from=None):
             
             # 梯度裁剪
             scaler.unscale_(opt_cd)
-            torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 1.0)
+            # torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 1.0)
             
             # 更新参数
             scaler.step(opt_cd)
@@ -1190,14 +1210,17 @@ def train(resume_from=None):
                             val_real_global_embedded,
                             val_real_global_mask_embedded,
                         )
+                        val_fake_preds = torch.sigmoid(val_fake_preds)
+                        val_real_preds = torch.sigmoid(val_real_preds)
 
                         # 计算准确率
                         val_total += val_fake_preds.size(0) * 2
                         val_correct += (
                             (val_fake_preds < 0.5).sum() + (val_real_preds >= 0.5).sum()
                         ).item()
+                        print(f"validation: fake_preds: {val_fake_preds}/{val_fake_preds.size(0)}, real_preds: {val_real_preds}/{val_real_preds.size(0)}")
                 
-                val_accuracy = val_correct / val_total if val_total > 0 else 0.5
+                val_accuracy = val_correct / val_total
                 print(f"\n验证准确率: {val_accuracy:.4f}")
                 
                 # 检查是否有改进
