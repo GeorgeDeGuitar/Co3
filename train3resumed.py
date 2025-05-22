@@ -3,6 +3,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
+from torch.nn.utils import spectral_norm
 from torch.optim import Adadelta, Adam
 import torchvision.transforms as transforms
 from torchvision.utils import make_grid
@@ -25,8 +26,10 @@ from DemDataset import DemDataset
 from DemDataset import custom_collate_fn
 # from DEMData import custom_collate_fn
 from torch.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import gc
+import copy
 
 
 # setx PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:98
@@ -1476,6 +1479,44 @@ def train(resume_from=None):
     torch.cuda.empty_cache()
     pbar = tqdm(total=steps_3)
     step = 0'''
+    def random_label_flip(labels, flip_prob=0.1):
+        """随机翻转一部分标签"""
+        flipped_labels = labels.clone()
+        flip_mask = (torch.rand_like(labels) < flip_prob).float()
+        flipped_labels = labels * (1 - flip_mask) + (1 - labels) * flip_mask
+        return flipped_labels
+    def r1_regularization(discriminator, real_data, real_mask, real_global, real_global_mask, weight=10.0):
+        """R1正则化 - 在真实数据上的梯度惩罚"""
+        # 需要梯度
+        real_data.requires_grad_(True)
+        
+        # 前向传播
+        real_pred, _, _ = discriminator(real_data, real_mask, real_global, real_global_mask)
+        
+        # 对所有样本的预测求和
+        pred_sum = real_pred.sum()
+        
+        # 计算梯度
+        gradients = torch.autograd.grad(outputs=pred_sum, inputs=real_data, 
+                                    create_graph=True, retain_graph=True)[0]
+        
+        # 梯度平方范数
+        grad_norm_squared = gradients.pow(2).reshape(gradients.shape[0], -1).sum(1)
+        
+        # R1正则化
+        r1_penalty = weight * grad_norm_squared.mean() / 2
+        
+        return r1_penalty
+
+    # 动态增加R1权重
+    def get_r1_weight(step, max_steps, min_weight=1.0, max_weight=10.0):
+        return min_weight + (max_weight - min_weight) * min(1.0, step / (0.5 * max_steps))
+    
+    def check_discriminator_collapse(real_acc, fake_acc, threshold=0.2):
+        """检查判别器是否崩溃"""
+        # 如果真实样本准确率太低或假样本准确率太高
+        return real_acc < threshold or (1 - fake_acc) < threshold
+
     best_val_loss_joint = float("inf")
     if step_phase3 < steps_3 and phase == 3:
         print("开始/继续第3阶段训练...")
@@ -1489,11 +1530,31 @@ def train(resume_from=None):
         lambda_gp = 10.0  # 梯度惩罚权重
         smooth_factor = 0.1  # 标签平滑因子
         
-        # 添加学习率调度器，在训练进行时逐渐降低学习率
-        from torch.optim.lr_scheduler import ReduceLROnPlateau
+        # 修改判别器优化器，增加权重衰减
+        opt_cd = torch.optim.Adam(model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), weight_decay=1e-4)
+        '''def apply_spectral_norm(module):
+            """递归应用谱归一化到所有卷积和线性层"""
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                return spectral_norm(module)
+            for name, child in module.named_children():
+                module._modules[name] = apply_spectral_norm(child)
+            return module
 
+        # 应用到判别器
+        model_cd = apply_spectral_norm(model_cd)'''
+
+        
+        # 添加学习率调度器，在训练进行时逐渐降低学习率
+        # ReduceLROnPlateau 学习率调度器参数说明（中文）：
+        # mode: 'min' 表示当监控的指标停止下降时，降低学习率
+        # factor: 学习率缩放因子，每次降低为原来的多少（如0.5表示减半）
+        # patience: 容忍多少个epoch/step指标无改善后才降低学习率
+        # verbose: 是否打印学习率调整信息
+        # 这里 scheduler_d 监控判别器的对抗损失（val_adv_loss），scheduler_g 监控生成器的重建损失（val_recon_loss）
         scheduler_d = ReduceLROnPlateau(opt_cd, mode='min', factor=0.5, patience=50, verbose=True)
         scheduler_g = ReduceLROnPlateau(opt_cn, mode='min', factor=0.5, patience=50, verbose=True)
+        good_state = copy.deepcopy(model_cd.state_dict())
+        patience_counter = 0
 
         # 主训练循环
         while step < steps_3:
@@ -1527,6 +1588,9 @@ def train(resume_from=None):
                 batch_size = batch_local_targets.size(0)
                 real_labels = torch.ones(batch_size, 1, device=device) * (1.0 - smooth_factor)
                 fake_labels = torch.zeros(batch_size, 1, device=device) + smooth_factor
+                # 在训练判别器时使用
+                real_labels_flipped = random_label_flip(real_labels, flip_prob=0.1)
+                fake_labels_flipped = random_label_flip(fake_labels, flip_prob=0.1)
                 
                 # 真实样本前向传播
                 real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
@@ -1534,7 +1598,7 @@ def train(resume_from=None):
                 real_predictions, real_lf, real_gf = model_cd(
                     batch_local_targets, batch_local_masks, 
                     real_global_embedded, real_global_mask_embedded)
-                loss_cd_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)
+                loss_cd_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels_flipped)
                 
                 # 假样本前向传播
                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
@@ -1544,7 +1608,7 @@ def train(resume_from=None):
                     batch_local_masks, 
                     fake_global_embedded.detach(),  # 分离梯度
                     fake_global_mask_embedded)
-                loss_cd_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)
+                loss_cd_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels_flipped)
                 
                 # 特征匹配损失 - 使用分离的生成器特征
                 fm_loss_d = feature_contrastive_loss(
@@ -1585,6 +1649,7 @@ def train(resume_from=None):
                 # 反向传播和优化
                 opt_cd.zero_grad()
                 loss_cd.backward()
+                torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
                 opt_cd.step()
         
                 
@@ -1629,10 +1694,11 @@ def train(resume_from=None):
                 # 反向传播和优化
                 opt_cn.zero_grad()
                 loss_cn.backward()
+                # 在这里添加梯度裁剪，backward()之后，step()之前
+                torch.nn.utils.clip_grad_norm_(model_cn .parameters(), max_norm=1.0)
                 opt_cn.step()
                 
-                
-                
+                          
                 # 解除参数冻结
                 for param in model_cd.parameters():
                     param.requires_grad = True
@@ -1674,6 +1740,36 @@ def train(resume_from=None):
                     val_fake_acc = val_metrics['fake_acc']
                     val_disc_acc = val_metrics['disc_acc']  
                     # print(f"Step {step}, Validation Loss: {avg_val_loss:.5f}")
+                    # 使用验证损失更新调度器
+                    scheduler_d.step(val_adv_loss)
+                    scheduler_g.step(val_recon_loss)
+                    
+                    
+                    # 检查判别器崩溃
+                    if (val_real_acc < 0.3 or val_fake_acc < 0.3) and patience_counter>10:
+                        print("检测到判别器可能崩溃，采取措施...")
+                        
+                        # 如果有良好状态的保存，则重置
+                        if 'good_state' in locals() and good_state is not None:
+                            print("重置判别器到之前的良好状态")
+                            model_cd.load_state_dict(good_state)
+                            patience_counter += 1
+                        # 否则减小学习率并增加正则化
+                        else:
+                            print("减小学习率并增加正则化")
+                            for param_group in opt_cd.param_groups:
+                                param_group['lr'] *= 0.8
+                            # 增加权重衰减
+                            opt_cd = torch.optim.Adam(model_cd.parameters(), 
+                                                    lr=param_group['lr'], 
+                                                    betas=(0.8, 0.999), 
+                                                    weight_decay=5e-4)
+                    
+                    # 如果判别器表现良好，保存状态
+                    elif 0.4 < val_real_acc  and 0.4 < val_fake_acc:
+                        print("判别器表现平衡，保存良好状态")
+                        good_state = copy.deepcopy(model_cd.state_dict())
+                        patience_counter = 0
 
                     # Update Visdom plot for validation loss
                     viz.line(
@@ -1827,7 +1923,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=None , help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results\checkpoint_phase3_step8500.pth", help="resume from checkpoint path")
     args = parser.parse_args()
     
     train(resume_from=args.resume)
