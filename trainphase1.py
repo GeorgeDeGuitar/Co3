@@ -16,7 +16,7 @@ from torchvision.transforms.functional import to_pil_image
 from loss import  completion_network_loss
 import torch.nn.functional as F
 # Import your models
-from models import CompletionNetwork, ContextDiscriminator
+from modelcn import CompletionNetwork, ContextDiscriminator
 
 # Import your custom dataset
 from DemDataset import DemDataset
@@ -48,15 +48,22 @@ def save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, phase, result_dir,
         'best_val_loss': best_val_loss,
         'best_acc': best_acc
     }
-    
+    # 删除旧的模型文件
+    old_files = glob.glob(os.path.join(result_dir, f"checkpoint_phase{phase}_step*"))
+    for file in old_files:
+        try:
+            os.remove(file)
+            print(f"删除旧文件: {os.path.basename(file)}")
+        except Exception as e:
+            print(f"删除文件失败: {e}")
     checkpoint_path = os.path.join(result_dir, f"checkpoint_phase{phase}_step{step}.pth")
     torch.save(checkpoint, checkpoint_path)
     print(f"保存检查点到 {checkpoint_path}")
     
-    # 保存一个最新的检查点文件，方便恢复
+    '''# 保存一个最新的检查点文件，方便恢复
     latest_checkpoint_path = os.path.join(result_dir, f"latest_checkpoint.pth")
     torch.save(checkpoint, latest_checkpoint_path)
-    print(f"保存最新检查点到 {latest_checkpoint_path}")
+    print(f"保存最新检查点到 {latest_checkpoint_path}")'''
     
     return checkpoint_path
 
@@ -65,7 +72,7 @@ def load_checkpoint(checkpoint_path, model_cn, model_cd, opt_cn, opt_cd, device)
     加载训练检查点，恢复模型权重、优化器状态和训练进度
     """
     print(f"从 {checkpoint_path} 加载检查点")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     
     model_cn.load_state_dict(checkpoint['model_cn_state_dict'])
     
@@ -144,7 +151,7 @@ def train(resume_from=None):
     target_dir = (
         r"E:\KingCrimson Dataset\Simulate\data0\groundtruthstatus\statusarray" # 全局target
     )
-    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results13"  # 结果保存路径
+    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\resultsphase2"  # 结果保存路径
     cache_dir = r"E:\KingCrimson Dataset\Simulate\data0\traindata"  # 缓存目录
 
     # Training parameters
@@ -166,12 +173,12 @@ def train(resume_from=None):
     # Hardware setup
     if not torch.cuda.is_available():
         raise Exception("At least one GPU must be available.")
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:1")
     #device = torch.device("cpu")
 
     # Initialize Visdom
-    viz = visdom.Visdom(env="dem_completion")
-    viz.close(env="dem_completion")
+    viz = visdom.Visdom(env="dem_completion_phase2")
+    viz.close(env="dem_completion_phase2")
 
     # Create windows for the different phases and metrics
     loss_windows = {
@@ -293,7 +300,7 @@ def train(resume_from=None):
     # opt_cd = Adam(model_cd.parameters(), lr=1e-4)
     
      # 初始化训练状态变量
-    phase = 3  # 从第一阶段开始
+    phase = 1  # 从第一阶段开始
     step_phase1 = 0
     step_phase2 = 0
     step_phase3 = 0
@@ -318,20 +325,20 @@ def train(resume_from=None):
             step_phase3 = step
             best_val_loss_joint = best_val_loss  # 在第三阶段使用
     else:
-        if phase==2:
+        if phase==2 or phase==3:
             # Load pre-trained weights if available
-            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results13\phase_1\model_cn_best"
+            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_best"
             if os.path.exists(pretrained_weights_path):
                 model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device))
                 print(f"Phase2: Loaded pre-trained weights from {pretrained_weights_path}")
-        elif phase==3:
+        if phase==3:
             # Load pre-trained weights if available
-            pretrained_weights_path_cn= r"E:\KingCrimson Dataset\Simulate\data0\results13\phase_1\model_cn_best"
+            pretrained_weights_path_cn= r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_best"
             if os.path.exists(pretrained_weights_path_cn):
                 model_cn.load_state_dict(torch.load(pretrained_weights_path_cn, map_location=device))
-                print(f"Phase3: Loaded pre-trained weights from {pretrained_weights_path_cn}")
+                print(f"Phase2: Loaded pre-trained weights from {pretrained_weights_path_cn}")
                 
-            pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\resultsphase2\phase_2\model_cd_best"
+            pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_2\model_cd_best0"
             if os.path.exists(pretrained_weights_path_cd):
                 model_cd.load_state_dict(torch.load(pretrained_weights_path_cd, map_location=device))
                 print(f"Phase3: Loaded pre-trained weights from {pretrained_weights_path_cd}")
@@ -865,16 +872,10 @@ def train(resume_from=None):
                             "phase_1",
                         )
 
-                        # 保存模型
-                        folder= os.path.join(result_dir, "phase_1")
-                        old_files = glob.glob(os.path.join(folder, "model_cn_step*"))
-                        for file in old_files:
-                            try:
-                                os.remove(file)
-                                print(f"删除旧文件: {os.path.basename(file)}")
-                            except Exception as e:
-                                print(f"删除文件失败: {e}")
-                        model_path = os.path.join(result_dir, "phase_1", f"model_cn_step{step}")
+                        # Save model
+                        model_path = os.path.join(
+                            result_dir, "phase_1", f"model_cn_step{step}"
+                        )
                         torch.save(model_cn.state_dict(), model_path)
 
                     model_cn.train()
@@ -1131,7 +1132,7 @@ def train(resume_from=None):
         return balance_loss
     
     
-    def r1_regularization(discriminator, real_data, real_mask, real_global, real_global_mask, weight=5.0):
+    def r1_regularization(discriminator, real_data, real_mask, real_global, real_global_mask, weight=1e3):
         """R1正则化 - 在真实数据上的梯度惩罚"""
         # 需要梯度
         real_data.requires_grad_(True)
@@ -1161,7 +1162,7 @@ def train(resume_from=None):
     '''print("Starting Phase 2 training...")
     pbar = tqdm(total=steps_2)
     step = 0'''
-    best_acc = float("-inf")
+    # best_acc = float("-inf")
     
 
     if step_phase2 < steps_2 and phase == 2:
@@ -1185,7 +1186,7 @@ def train(resume_from=None):
         running_loss = 0.0
         running_real_acc = 0.0
         running_fake_acc = 0.0
-        # best_acc = float('-inf')
+        best_acc = float('-inf')
         patience_counter = 0
         max_patience = 10
         
@@ -1295,19 +1296,19 @@ def train(resume_from=None):
                         fake_acc = (fake_probs < 0.5).float().mean().item()
                         avg_acc = (real_acc + fake_acc) / 2
         
-                    # 动态调整损失权重，平衡训练
+                    '''# 动态调整损失权重，平衡训练
                     if real_acc < 0.1 and fake_acc > 0.9:
                         # 真实样本识别困难，增加真实样本权重
-                        loss_real *= 5.0 
-                        loss_fake *= 0.5
+                        loss_real *= 1.5
+                        loss_fake *= 0.66
                         print("loss real weight strengthened")
                     elif fake_acc < 0.1 and real_acc > 0.9:
                         # 假样本识别困难，增加假样本权重
-                        loss_real *= 0.5 
-                        loss_fake *= 5.0
+                        loss_real *= 0.66
+                        loss_fake *= 1.5
                         print("loss fake weight strengthened")
                     else:
-                        0
+                        0'''
 
                     loss = loss_real + loss_fake + fm_loss + lsb_loss + r1_loss # + gp_loss
                     print(f"loss_real: {loss_real}, loss_fake: {loss_fake}, fm_loss: {fm_loss}, r1_loss: {r1_loss}")
@@ -1474,39 +1475,6 @@ def train(resume_from=None):
                     model_path = os.path.join(result_dir, "phase_2", f"model_cd_step{step}")
                     torch.save(model_cd.state_dict(), model_path)
                     
-                    '''# 可视化
-                    with torch.no_grad():
-                        # 从验证集获取批次
-                        val_batch = next(iter(val_subset_loader))
-                        
-                        # 准备验证批次
-                        val_data = prepare_batch_data(val_batch, device)
-                        (
-                            val_local_inputs,
-                            val_local_masks,
-                            val_local_targets,
-                            val_global_inputs,
-                            val_global_masks,
-                            val_global_targets,
-                            val_metadata,
-                        ) = val_data
-                        
-                        # 生成输出
-                        test_output = model_cn(
-                            val_local_inputs,
-                            val_local_masks,
-                            val_global_inputs,
-                            val_global_masks,
-                        )
-                        
-                        # 可视化结果
-                        visualize_results(
-                            val_local_targets,
-                            val_local_inputs,
-                            test_output,
-                            step=step,
-                            phase="phase_2",
-                        )'''
                     
                     # 回到训练模式
                     model_cd.train()
@@ -1525,7 +1493,7 @@ def train(resume_from=None):
         pbar.close()
         print(f"Phase 2 训练完成! 最佳判别器准确率: {best_acc:.4f}")
 
-# =================================================
+    # =================================================
     # Training Phase 3: Joint training of both networks
     # =================================================
     '''print("Starting Phase 3 training...")
@@ -1604,8 +1572,8 @@ def train(resume_from=None):
         # patience: 容忍多少个epoch/step指标无改善后才降低学习率
         # verbose: 是否打印学习率调整信息
         # 这里 scheduler_d 监控判别器的对抗损失（val_adv_loss），scheduler_g 监控生成器的重建损失（val_recon_loss）
-        scheduler_d = ReduceLROnPlateau(opt_cd, mode='min', factor=0.8, patience=10)
-        scheduler_g = ReduceLROnPlateau(opt_cn, mode='min', factor=0.8, patience=10)
+        scheduler_d = ReduceLROnPlateau(opt_cd, mode='min', factor=0.8, patience=10, verbose=True)
+        scheduler_g = ReduceLROnPlateau(opt_cn, mode='min', factor=0.8, patience=10, verbose=True)
         good_state = copy.deepcopy(model_cd.state_dict())
         patience_counter = 0
 
@@ -1687,13 +1655,13 @@ def train(resume_from=None):
                 # 动态调整损失权重，平衡训练
                 if real_acc < 0.1 and fake_acc > 0.9:
                     # 真实样本识别困难，增加真实样本权重
-                    loss_cd_real *= 1.1
-                    loss_cd_fake *= 0.95
+                    loss_real *= 1.1
+                    loss_fake *= 0.95
                     print("loss real weight strengthened")
                 elif fake_acc < 0.1 and real_acc > 0.9:
                     # 假样本识别困难，增加假样本权重
-                    loss_cd_real *= 0.95 
-                    loss_cd_fake *= 1.1
+                    loss_real *= 0.95 
+                    loss_fake *= 1.1
                     print("loss fake weight strengthened")
                 else:
                     0
@@ -1717,7 +1685,7 @@ def train(resume_from=None):
                     update="append",
                 )
                 viz.line(
-                    Y=torch.tensor([[fake_acc, real_acc]]),
+                    Y=torch.tensor([[fake_acc.item(), real_acc.item()]]),
                     X=torch.tensor([step]),
                     win=loss_windows["phase3_fake_acc"],
                     update="append",
@@ -2009,7 +1977,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results13\checkpoint_phase3_step73500.pth", help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\resultsphase2\checkpoint_phase2_step28000.pth", help="resume from checkpoint path")
     args = parser.parse_args()
     
     train(resume_from=args.resume)

@@ -205,8 +205,8 @@ def perform_dem_completion(model, input_batch, device, output_dir):
 
 def main():
     # Configuration
-    model_path = r"E:\KingCrimson Dataset\Simulate\data0\results13\phase_3_0\model_cn_best"  # Path to your best model weights
-    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results13\predict0"  # Directory to save results
+    model_path = r"E:\KingCrimson Dataset\Simulate\data0\results13\phase_3\model_cn_best"  # Path to your best model weights
+    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results13\predict1"  # Directory to save results
     
     # Test data paths
     json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"

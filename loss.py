@@ -869,7 +869,7 @@ def completion_network_loss(
     ew = 0# 0.2
     cw = 1
     cg=0
-    vw = 0.1 # 加mask
+    vw = 0.01 # 加mask
     gsw = 0 # 加mask
     ssimw = 0
     msw = 0
