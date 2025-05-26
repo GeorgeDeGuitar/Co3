@@ -14,6 +14,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import Parameter
+
+import torch
+from torch import nn
+from torch.nn import functional as F
+from torch.nn import Parameter
+
 def l2normalize(v, eps=1e-12):
     return v / (v.norm() + eps)
 
@@ -144,14 +154,11 @@ class GatedConv2d(nn.Module):
             self.mask_conv2d = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x, mask=None):
+    def forward(self, x):
         x = self.pad(x)
         conv = self.conv2d(x)
         mask_conv = self.mask_conv2d(x)
         gated_mask = self.sigmoid(mask_conv)
-        if mask is not None:
-            mask = F.interpolate(mask, size=x.shape[2:], mode="bilinear", align_corners=True)
-            gated_mask = gated_mask * mask  # 应用掩码
         x = conv * gated_mask
         if self.norm:
             x = self.norm(x)
@@ -160,10 +167,22 @@ class GatedConv2d(nn.Module):
         return x
 
 class PartialGatedConv2d(nn.Module):
+    """
+    结合Partial Convolution和Gated Convolution的模块
+    流程：Gated Conv → Partial Conv Mask → 相乘输出
+    """
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
                  pad_type='reflect', activation='lrelu', norm='none', sn=False, multi_channel=False):
         super(PartialGatedConv2d, self).__init__()
 
+        # 存储参数
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.multi_channel = multi_channel
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+
+        # 填充层
         if pad_type == 'reflect':
             self.pad = nn.ReflectionPad2d(padding)
         elif pad_type == 'replicate':
@@ -173,6 +192,27 @@ class PartialGatedConv2d(nn.Module):
         else:
             raise ValueError(f"Unsupported padding type: {pad_type}")
 
+        # Gated Convolution的两个分支
+        if sn:
+            self.conv_feature = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation))
+            self.conv_gating = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation))
+        else:
+            self.conv_feature = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
+            self.conv_gating = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
+        
+        self.sigmoid = nn.Sigmoid()
+
+        # Partial Convolution的mask更新机制（参考官方实现）
+        if self.multi_channel:
+            self.weight_maskUpdater = torch.ones(out_channels, in_channels, self.kernel_size[0], self.kernel_size[1])
+        else:
+            self.weight_maskUpdater = torch.ones(1, 1, self.kernel_size[0], self.kernel_size[1])
+        
+        self.slide_winsize = self.weight_maskUpdater.shape[1] * self.weight_maskUpdater.shape[2] * self.weight_maskUpdater.shape[3]
+        self.last_size = (None, None, None, None)
+        self.update_mask = None
+
+        # 归一化层
         if norm == 'bn':
             self.norm = nn.BatchNorm2d(out_channels)
         elif norm == 'in':
@@ -184,6 +224,7 @@ class PartialGatedConv2d(nn.Module):
         else:
             raise ValueError(f"Unsupported normalization: {norm}")
 
+        # 激活函数
         if activation == 'relu':
             self.activation = nn.ReLU(inplace=True)
         elif activation == 'lrelu':
@@ -201,65 +242,54 @@ class PartialGatedConv2d(nn.Module):
         else:
             raise ValueError(f"Unsupported activation: {activation}")
 
-        if sn:
-            self.conv2d = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation))
-            self.mask_conv2d = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation))
-        else:
-            self.conv2d = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
-            self.mask_conv2d = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
-        self.sigmoid = nn.Sigmoid()
-
-        self.multi_channel = multi_channel
-        if self.multi_channel:
-            self.weight_maskUpdater = torch.ones(out_channels, in_channels, kernel_size, kernel_size)
-        else:
-            self.weight_maskUpdater = torch.ones(1, 1, kernel_size, kernel_size)
-        self.slide_winsize = self.weight_maskUpdater.numel()
-        self.last_size = (None, None, None, None)
-        self.update_mask = None
-        self.mask_ratio = None
-
-    def forward(self, x, mask_in=None):
-        assert len(x.shape) == 4, "Input must be a 4D tensor"
-
-        if mask_in is not None or self.last_size != tuple(x.shape):
-            self.last_size = tuple(x.shape)
-
+    def forward(self, input, mask_in=None):
+        assert len(input.shape) == 4
+        
+        # 1. 应用填充
+        input_padded = self.pad(input)
+        
+        # 2. Gated Convolution：计算feature和gating
+        feature = self.conv_feature(input_padded)
+        gating = self.sigmoid(self.conv_gating(input_padded))
+        
+        # 3. Partial Convolution的mask更新机制（关键：基于输入mask的实际尺寸）
+        if mask_in is not None or self.last_size != tuple(input.shape):
+            self.last_size = tuple(input.shape)
             with torch.no_grad():
-                if self.weight_maskUpdater.type() != x.type():
-                    self.weight_maskUpdater = self.weight_maskUpdater.to(x.device)
-
+                if self.weight_maskUpdater.type() != input.type():
+                    self.weight_maskUpdater = self.weight_maskUpdater.to(input)
+                
+                # 处理输入mask - 关键修正：使用实际的输入mask尺寸
                 if mask_in is None:
                     if self.multi_channel:
-                        mask = torch.ones_like(x)
+                        mask = torch.ones(input.data.shape[0], input.data.shape[1], input.data.shape[2], input.data.shape[3]).to(input)
                     else:
-                        mask = torch.ones(1, 1, x.shape[2], x.shape[3]).to(x.device)
+                        mask = torch.ones(input.shape[0], 1, input.shape[2], input.shape[3]).to(input)
                 else:
-                    mask = mask_in
-
-                self.update_mask = F.conv2d(mask, self.weight_maskUpdater, bias=None, stride=self.stride,
-                                          padding=self.padding, dilation=self.dilation, groups=1)
-                eps = 1e-8
-                self.mask_ratio = self.slide_winsize / (self.update_mask + eps)
+                    # 如果输入mask与input尺寸不匹配，需要resize
+                    if mask_in.shape[2:] != input.shape[2:]:
+                        mask = F.interpolate(mask_in, size=input.shape[2:], mode='nearest')
+                    else:
+                        mask = mask_in
+                
+                # 计算更新后的mask（基于调整后的mask尺寸）
+                self.update_mask = F.conv2d(mask, self.weight_maskUpdater, bias=None, 
+                                          stride=self.stride, padding=self.padding, 
+                                          dilation=self.dilation, groups=1)
                 self.update_mask = torch.clamp(self.update_mask, 0, 1)
-                self.mask_ratio = self.mask_ratio * self.update_mask
-
-        x = self.pad(x)
-        raw_out = self.conv2d(x * mask if mask_in is not None else x)
-        mask_conv_out = self.mask_conv2d(x)
-
-        gated_mask = self.sigmoid(mask_conv_out)
-        gated_mask = gated_mask * self.update_mask
-
-        if self.bias is not None:
-            bias_view = self.bias.view(1, self.out_channels, 1, 1).to(x.device)
-            output = (raw_out - bias_view) * self.mask_ratio + bias_view
-        else:
-            output = raw_out * self.mask_ratio
-
-        output = output * gated_mask
-        output = output * self.update_mask
-
+        
+        # 4. 确保三者尺寸一致并相乘：feature × gating × mask
+        # 调试信息
+        # print(f"Feature shape: {feature.shape}, Gating shape: {gating.shape}, Update mask shape: {self.update_mask.shape}")
+        
+        # 如果update_mask尺寸与feature/gating不匹配，进行调整
+        if self.update_mask.shape[2:] != feature.shape[2:]:
+            self.update_mask = F.interpolate(self.update_mask, size=feature.shape[2:], mode='nearest')
+           #  print(f"Resized update mask to: {self.update_mask.shape}")
+        
+        output = feature * gating * self.update_mask
+        
+        # 5. 归一化和激活
         if self.norm:
             output = self.norm(output)
         if self.activation:
@@ -275,11 +305,9 @@ class TransposeGatedConv2d(nn.Module):
         self.gated_conv2d = GatedConv2d(in_channels, out_channels, kernel_size, stride, padding,
                                       dilation, pad_type, activation, norm, sn)
 
-    def forward(self, x, mask=None):
+    def forward(self, x):
         x = F.interpolate(x, scale_factor=self.scale_factor, mode='nearest')
-        if mask is not None:
-            mask = F.interpolate(mask, scale_factor=self.scale_factor, mode='nearest')
-        x = self.gated_conv2d(x, mask)
+        x = self.gated_conv2d(x)
         return x
 
 class EarlyAttentionModule(nn.Module):
@@ -362,23 +390,19 @@ class CompletionNetwork(nn.Module):
                         pad_type='reflect', activation='relu', norm='bn'),
         )
 
-        # Global encoder with PartialGatedConv2d
-        self.global_enc1 = nn.Sequential(
-            PartialGatedConv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2,
-                              pad_type='reflect', activation='relu', norm='bn'),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-        self.global_enc2 = nn.Sequential(
-            PartialGatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
-                              pad_type='reflect', activation='relu', norm='bn'),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-        self.global_enc3 = nn.Sequential(
-            PartialGatedConv2d(128, 256, kernel_size=3, stride=2, padding=1,
-                              pad_type='reflect', activation='relu', norm='bn'),
-            PartialGatedConv2d(256, 256, kernel_size=3, stride=2, padding=0,
-                              pad_type='reflect', activation='relu', norm='bn'),
-        )
+        # Global encoder with PartialGatedConv2d - 修正：分解为独立层
+        self.global_enc1_conv = PartialGatedConv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2,
+                                                  pad_type='reflect', activation='relu', norm='bn')
+        self.global_enc1_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        self.global_enc2_conv = PartialGatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
+                                                  pad_type='reflect', activation='relu', norm='bn')
+        self.global_enc2_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        self.global_enc3_conv1 = PartialGatedConv2d(128, 256, kernel_size=3, stride=2, padding=1,
+                                                   pad_type='reflect', activation='relu', norm='bn')
+        self.global_enc3_conv2 = PartialGatedConv2d(256, 256, kernel_size=3, stride=2, padding=0,
+                                                   pad_type='reflect', activation='relu', norm='bn')
 
         # Global attention module for high-level features
         self.global_attention = MaskAttentionModule(256)
@@ -455,39 +479,32 @@ class CompletionNetwork(nn.Module):
         local_x = torch.cat([local_input_attended, local_mask], dim=1)
         global_x = torch.cat([global_input_attended, global_mask], dim=1)
 
-        # Local encoder forward pass with GatedConv2d
-        local_feat1 = self.local_enc1[0](local_x, local_mask)
-        for layer in self.local_enc1[1:]:
-            local_feat1 = layer(local_feat1)
+        # Local encoder forward pass with GatedConv2d (no mask input)
+        local_feat1 = self.local_enc1(local_x)
         self.print_sizes(local_feat1, "local_feat1")
 
-        local_feat2 = self.local_enc2[0](local_feat1, local_mask)
-        for layer in self.local_enc2[1:]:
-            local_feat2 = layer(local_feat2)
+        local_feat2 = self.local_enc2(local_feat1)
         self.print_sizes(local_feat2, "local_feat2")
 
-        local_feat3 = self.local_enc3[0](local_feat2, local_mask)
-        for layer in self.local_enc3[1:]:
-            local_feat3 = layer(local_feat3)
+        local_feat3 = self.local_enc3(local_feat2)
         self.print_sizes(local_feat3, "local_feat3")
 
-        # Global encoder forward pass with PartialGatedConv2d
+        # Global encoder forward pass with PartialGatedConv2d - 修正版本
         global_mask_current = global_mask
-        global_feat1, global_mask_current = self.global_enc1[0](global_x, global_mask_current)
-        global_feat1 = self.global_enc1[1](global_feat1)  # MaxPool2d
+        
+        global_feat1, global_mask_current = self.global_enc1_conv(global_x, global_mask_current)
+        global_feat1 = self.global_enc1_pool(global_feat1)
         self.print_sizes(global_feat1, "global_feat1")
 
-        global_feat2, global_mask_current = self.global_enc2[0](global_feat1, global_mask_current)
-        global_feat2 = self.global_enc2[1](global_feat2)  # MaxPool2d
+        global_feat2, global_mask_current = self.global_enc2_conv(global_feat1, global_mask_current)
+        global_feat2 = self.global_enc2_pool(global_feat2)
         self.print_sizes(global_feat2, "global_feat2")
 
-        global_feat3, global_mask_current = self.global_enc3[0](global_feat2, global_mask_current)
-        for i, layer in enumerate(self.global_enc3[1:]):
-            if i % 2 == 0:  # PartialGatedConv2d
-                global_feat3, global_mask_current = layer(global_feat3, global_mask_current)
-            else:  # BatchNorm2d or ReLU
-                global_feat3 = layer(global_feat3)
-        self.print_sizes(global_feat3, "global_feat3")
+        global_feat3, global_mask_current = self.global_enc3_conv1(global_feat2, global_mask_current)
+        self.print_sizes(global_feat3, "global_feat3_conv1")
+        
+        global_feat3, global_mask_current = self.global_enc3_conv2(global_feat3, global_mask_current)
+        self.print_sizes(global_feat3, "global_feat3_conv2")
 
         # Resize global features to match local features
         global_feat3_resized = F.interpolate(
@@ -505,8 +522,8 @@ class CompletionNetwork(nn.Module):
         fused_features = self.fusion(combined_features)
         self.print_sizes(fused_features, "fused_features")
 
-        # Decoder with TransposeGatedConv2d
-        dec1 = self.decoder1(fused_features, local_mask)
+        # Decoder with TransposeGatedConv2d (no mask input)
+        dec1 = self.decoder1(fused_features)
         self.print_sizes(dec1, "dec1")
 
         if dec1.size()[2:] != local_feat2.size()[2:]:
@@ -519,7 +536,7 @@ class CompletionNetwork(nn.Module):
         skip1_fused = self.skip_fusion1(skip1)
         self.print_sizes(skip1_fused, "skip1_fused")
 
-        dec2 = self.decoder2(skip1_fused, local_mask)
+        dec2 = self.decoder2(skip1_fused)
         self.print_sizes(dec2, "dec2")
 
         if dec2.size()[2:] != local_feat1.size()[2:]:
@@ -532,9 +549,8 @@ class CompletionNetwork(nn.Module):
         skip2_fused = self.skip_fusion2(skip2)
         self.print_sizes(skip2_fused, "skip2_fused")
 
-        # Final output with GatedConv2d
-        output = self.decoder3[0](skip2_fused, local_mask)
-        output = self.decoder3[1](output, local_mask)
+        # Final output with GatedConv2d (no mask input)
+        output = self.decoder3(skip2_fused)
         self.print_sizes(output, "output")
 
         # Smooth transition
@@ -558,7 +574,6 @@ class CompletionNetwork(nn.Module):
 
         final_output = (local_input * local_mask + smoothed_output * (1 - local_mask))
         return final_output
-
 
 class EnhancedTerrainFeatureExtractor(nn.Module):
     """简化版地形特征提取器：仅包含坡度和原始高程"""

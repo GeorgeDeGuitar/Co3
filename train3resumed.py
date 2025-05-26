@@ -138,13 +138,13 @@ def train(resume_from=None):
     )
     result_dir = r"F:\Dataset\Simulate\data0\result"  # 结果保存路径'''
 
-    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
+    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"  # 局部json
     array_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
     mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
     target_dir = (
         r"E:\KingCrimson Dataset\Simulate\data0\groundtruthstatus\statusarray" # 全局target
     )
-    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results13"  # 结果保存路径
+    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results"  # 结果保存路径
     cache_dir = r"E:\KingCrimson Dataset\Simulate\data0\traindata"  # 缓存目录
 
     # Training parameters
@@ -293,7 +293,7 @@ def train(resume_from=None):
     # opt_cd = Adam(model_cd.parameters(), lr=1e-4)
     
      # 初始化训练状态变量
-    phase = 3  # 从第一阶段开始
+    phase = 1  # 从第一阶段开始
     step_phase1 = 0
     step_phase2 = 0
     step_phase3 = 0
@@ -2009,7 +2009,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results13\checkpoint_phase3_step73500.pth", help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=None, help="resume from checkpoint path")
     args = parser.parse_args()
     
     train(resume_from=args.resume)
