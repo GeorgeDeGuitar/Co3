@@ -16,7 +16,8 @@ from torchvision.transforms.functional import to_pil_image
 from loss import  completion_network_loss
 import torch.nn.functional as F
 # Import your models
-from models import CompletionNetwork, ContextDiscriminator
+from models import ContextDiscriminator
+from modelcn import CompletionNetwork
 
 # Import your custom dataset
 from DemDataset import DemDataset
@@ -138,7 +139,7 @@ def train(resume_from=None):
     )
     result_dir = r"F:\Dataset\Simulate\data0\result"  # 结果保存路径'''
 
-    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"  # 局部json
+    json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
     array_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
     mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
     target_dir = (
@@ -153,8 +154,8 @@ def train(resume_from=None):
     steps_3 = 200000  # 400000  # Phase 3 training steps
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
-    snaperiod_2 = 500 # 2000  # How often to save snapshots in phase 2
-    snaperiod_3 = 500   # 10000  # How often to save snapshots in phase 3
+    snaperiod_2 = 2000 # 2000  # How often to save snapshots in phase 2
+    snaperiod_3 = 1000   # 10000  # How often to save snapshots in phase 3
 
     batch_size = 8  # Batch size
     alpha = 4e-1  # Alpha parameter for loss weighting
@@ -292,8 +293,8 @@ def train(resume_from=None):
     # opt_cn = Adam(model_cn.parameters(), lr=1e-4)
     # opt_cd = Adam(model_cd.parameters(), lr=1e-4)
     
-     # 初始化训练状态变量
-    phase = 1  # 从第一阶段开始
+    # 初始化训练状态变量
+    phase = 2  # 从第一阶段开始
     step_phase1 = 0
     step_phase2 = 0
     step_phase3 = 0
@@ -320,7 +321,7 @@ def train(resume_from=None):
     else:
         if phase==2:
             # Load pre-trained weights if available
-            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results13\phase_1\model_cn_best"
+            pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_step100000"
             if os.path.exists(pretrained_weights_path):
                 model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device))
                 print(f"Phase2: Loaded pre-trained weights from {pretrained_weights_path}")
@@ -883,6 +884,7 @@ def train(resume_from=None):
                     break
 
         pbar.close()
+    phase = 2  # 切换到第二阶段
 
     # =================================================
     # Training Phase 2: Train Context Discriminator only
@@ -1131,7 +1133,7 @@ def train(resume_from=None):
         return balance_loss
     
     
-    def r1_regularization(discriminator, real_data, real_mask, real_global, real_global_mask, weight=5.0):
+    def r1_regularization(discriminator, real_data, real_mask, real_global, real_global_mask, weight=1e3):
         """R1正则化 - 在真实数据上的梯度惩罚"""
         # 需要梯度
         real_data.requires_grad_(True)
@@ -1524,6 +1526,7 @@ def train(resume_from=None):
     
         pbar.close()
         print(f"Phase 2 训练完成! 最佳判别器准确率: {best_acc:.4f}")
+        phase = 3
 
 # =================================================
     # Training Phase 3: Joint training of both networks

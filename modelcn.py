@@ -194,11 +194,11 @@ class PartialGatedConv2d(nn.Module):
 
         # Gated Convolution的两个分支
         if sn:
-            self.conv_feature = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation))
-            self.conv_gating = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation))
+            self.conv_feature = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=self.padding, dilation=dilation))
+            self.conv_gating = SpectralNorm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=self.padding, dilation=dilation))
         else:
-            self.conv_feature = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
-            self.conv_gating = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation)
+            self.conv_feature = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=self.padding, dilation=dilation)
+            self.conv_gating = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=self.padding, dilation=dilation)
         
         self.sigmoid = nn.Sigmoid()
 
@@ -246,57 +246,55 @@ class PartialGatedConv2d(nn.Module):
         assert len(input.shape) == 4
         
         # 1. 应用填充
-        input_padded = self.pad(input)
+        # input_padded = self.pad(input)
         
         # 2. Gated Convolution：计算feature和gating
-        feature = self.conv_feature(input_padded)
-        gating = self.sigmoid(self.conv_gating(input_padded))
+        feature = self.conv_feature(input)
+        gating = self.sigmoid(self.conv_gating(input))
         
-        # 3. Partial Convolution的mask更新机制（关键：基于输入mask的实际尺寸）
-        if mask_in is not None or self.last_size != tuple(input.shape):
-            self.last_size = tuple(input.shape)
-            with torch.no_grad():
-                if self.weight_maskUpdater.type() != input.type():
-                    self.weight_maskUpdater = self.weight_maskUpdater.to(input)
-                
-                # 处理输入mask - 关键修正：使用实际的输入mask尺寸
-                if mask_in is None:
-                    if self.multi_channel:
-                        mask = torch.ones(input.data.shape[0], input.data.shape[1], input.data.shape[2], input.data.shape[3]).to(input)
-                    else:
-                        mask = torch.ones(input.shape[0], 1, input.shape[2], input.shape[3]).to(input)
+        # 3. Partial Convolution的mask更新机制
+        with torch.no_grad():
+            if self.weight_maskUpdater.type() != input.type():
+                self.weight_maskUpdater = self.weight_maskUpdater.to(input)
+            
+            # 关键修正：确保mask与当前输入尺寸匹配
+            if mask_in is None:
+                if self.multi_channel:
+                    current_mask = torch.ones_like(input)
                 else:
-                    # 如果输入mask与input尺寸不匹配，需要resize
-                    if mask_in.shape[2:] != input.shape[2:]:
-                        mask = F.interpolate(mask_in, size=input.shape[2:], mode='nearest')
-                    else:
-                        mask = mask_in
-                
-                # 计算更新后的mask（基于调整后的mask尺寸）
-                self.update_mask = F.conv2d(mask, self.weight_maskUpdater, bias=None, 
-                                          stride=self.stride, padding=self.padding, 
-                                          dilation=self.dilation, groups=1)
-                self.update_mask = torch.clamp(self.update_mask, 0, 1)
+                    current_mask = torch.ones(input.shape[0], 1, input.shape[2], input.shape[3]).to(input)
+            else:
+                '''# 如果传入的mask与当前输入尺寸不匹配，调整到输入尺寸
+                if mask_in.shape[2:] != input.shape[2:]:
+
+                    current_mask = F.interpolate(mask_in, size=input.shape[2:], mode='nearest')
+                else:'''
+                current_mask = mask_in
+            
+            # 使用与卷积相同的参数计算mask更新
+            self.update_mask = F.conv2d(current_mask, self.weight_maskUpdater, bias=None, 
+                                      stride=self.stride, padding=self.padding, 
+                                      dilation=self.dilation, groups=1)
+            self.update_mask = torch.clamp(self.update_mask, 0, 1)
         
-        # 4. 确保三者尺寸一致并相乘：feature × gating × mask
-        # 调试信息
-        # print(f"Feature shape: {feature.shape}, Gating shape: {gating.shape}, Update mask shape: {self.update_mask.shape}")
+        # 4. 验证空间尺寸
+        # print(f"Input: {input.shape}, Feature: {feature.shape}, Gating: {gating.shape}, Mask: {self.update_mask.shape}")
         
-        # 如果update_mask尺寸与feature/gating不匹配，进行调整
-        if self.update_mask.shape[2:] != feature.shape[2:]:
-            self.update_mask = F.interpolate(self.update_mask, size=feature.shape[2:], mode='nearest')
-           #  print(f"Resized update mask to: {self.update_mask.shape}")
+        # 检查空间尺寸是否匹配
+        assert feature.shape[2:] == gating.shape[2:] == self.update_mask.shape[2:], \
+            f"空间尺寸不匹配: feature={feature.shape[2:]}, gating={gating.shape[2:]}, mask={self.update_mask.shape[2:]}"
         
+        # 5. 三者相乘（PyTorch会自动处理广播）
         output = feature * gating * self.update_mask
         
-        # 5. 归一化和激活
+        # 6. 归一化和激活
         if self.norm:
             output = self.norm(output)
         if self.activation:
             output = self.activation(output)
 
         return output, self.update_mask
-
+    
 class TransposeGatedConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
                  pad_type='zero', activation='lrelu', norm='none', sn=True, scale_factor=2):
@@ -465,7 +463,8 @@ class CompletionNetwork(nn.Module):
 
     def print_sizes(self, tensor, name):
         if self.debug:
-            print(f"{name} size: {tensor.size()}")
+            0
+            #print(f"{name} size: {tensor.size()}")
 
     def forward(self, local_input, local_mask, global_input, global_mask):
         local_mask = local_mask.float()
@@ -493,11 +492,11 @@ class CompletionNetwork(nn.Module):
         global_mask_current = global_mask
         
         global_feat1, global_mask_current = self.global_enc1_conv(global_x, global_mask_current)
-        global_feat1 = self.global_enc1_pool(global_feat1)
+        #global_feat1 = self.global_enc1_pool(global_feat1)
         self.print_sizes(global_feat1, "global_feat1")
 
         global_feat2, global_mask_current = self.global_enc2_conv(global_feat1, global_mask_current)
-        global_feat2 = self.global_enc2_pool(global_feat2)
+        # global_feat2 = self.global_enc2_pool(global_feat2)
         self.print_sizes(global_feat2, "global_feat2")
 
         global_feat3, global_mask_current = self.global_enc3_conv1(global_feat2, global_mask_current)
