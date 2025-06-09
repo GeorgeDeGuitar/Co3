@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from scipy.ndimage import gaussian_filter
+from fanaly import ElevationBoundaryContinuityLoss
 import numpy as np
 
 import matplotlib.pyplot as plt
@@ -864,15 +865,16 @@ def completion_network_loss(
     output, local_target, mask, global_target, completed, completed_mask, pos
 ):
     """Calculate the completion network loss."""
-    nw = 0.4# 0.3
+    nw = 0.2# 0.3
     bw = 0# 0.5 #completed，大部分在无法改变的global
     ew = 0# 0.2
     cw = 1
     cg=0
-    vw = 0.01 # 加mask
+    vw = 0# .05 # 加mask
     gsw = 0 # 加mask
     ssimw = 0
     msw = 0
+    faw = 0# .4
     totalw = nw+bw+ew+cw+cg+vw+gsw+ssimw+msw
     
     criterion = nn.L1Loss()
@@ -897,7 +899,11 @@ def completion_network_loss(
     # enhanced_gradient_loss = EnhancedGradientConsistencyLoss()
     # gradient_loss = enhanced_gradient_loss(output, local_target, mask) # 增强损失，加入mask作用
     # blurred_mask = enhanced_gradient_loss.smooth_mask_generate(mask)
-    variation_loss = total_variation_loss(output, mask)*100 #全变差损失，相邻像素差异
+    # variation_loss = total_variation_loss(output, mask)*100 #全变差损失，相邻像素差异
+    
+    fa_boundary_loss = ElevationBoundaryContinuityLoss().to(output.device)
+    all_fa_loss = fa_boundary_loss(output, local_target, mask)
+    fa_loss = all_fa_loss['total']*1e-4
     # gradient_similarity = gradient_similarity_loss(output,local_target)*1000 # 梯度相似性损失，梯度方向的一致性
     # ssim = ssim_loss(output,local_target)*10
     # print(f"Consistency_loss: {consistency_loss}, SSIM loss: {ssim}, Gradient similarity loss: {gradient_similarity}, Variation loss: {variation_loss}, Mean shift loss: {mean_shift}")
@@ -905,5 +911,5 @@ def completion_network_loss(
         f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Variation loss: {variation_loss*vw}"
     )'''
     # return (null_loss * nw + bw * boundary_loss + edge_loss * ew + consistency_loss * cw + gradient_loss * cg + variation_loss*vw + gradient_similarity*gsw)/totalw
-    return (null_loss * nw + consistency_loss * cw+variation_loss*vw)/totalw
+    return (null_loss * nw + consistency_loss * cw + fa_loss * faw) / totalw
 

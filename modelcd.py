@@ -294,39 +294,6 @@ class PartialGatedConv2d(nn.Module):
             output = self.activation(output)
 
         return output, self.update_mask
-
-
-    
-class PartialMaxPool2d(nn.Module):
-    """
-    更灵活的Partial MaxPool，允许部分有效窗口
-    """
-    def __init__(self, kernel_size, stride=None, padding=0, valid_threshold=0.5):
-        super(PartialMaxPool2d, self).__init__()
-        self.kernel_size = kernel_size
-        self.stride = stride or kernel_size
-        self.padding = padding
-        self.valid_threshold = valid_threshold  # 有效性阈值
-        
-        self.register_buffer('weight_maskUpdater', 
-                           torch.ones(1, 1, kernel_size, kernel_size))
-        self.slide_winsize = kernel_size * kernel_size
-        
-    def forward(self, x, mask):
-        # 特征池化
-        pooled_x = F.max_pool2d(x, kernel_size=self.kernel_size, 
-                               stride=self.stride, padding=self.padding)
-        
-        # Mask更新
-        with torch.no_grad():
-            mask_sum = F.conv2d(mask, self.weight_maskUpdater, 
-                               stride=self.stride, padding=self.padding)
-            
-            # 使用阈值策略：窗口内有效像素比例超过阈值才认为有效
-            mask_ratio = mask_sum / self.slide_winsize
-            updated_mask = (mask_ratio >= self.valid_threshold).float()
-        
-        return pooled_x, updated_mask
     
 class TransposeGatedConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
@@ -348,8 +315,8 @@ class EarlyAttentionModule(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, mask):
-        # mask_resized = F.interpolate(mask, size=x.shape[2:], mode='bilinear', align_corners=True)
-        combined = torch.cat([x, mask], dim=1)
+        mask_resized = F.interpolate(mask, size=x.shape[2:], mode='bilinear', align_corners=True)
+        combined = torch.cat([x, mask_resized], dim=1)
         attention = self.sigmoid(self.conv(combined))
         return x * attention
 
@@ -407,26 +374,6 @@ class CompletionNetwork(nn.Module):
                         pad_type='reflect', activation='relu', norm='bn'),
         )
         self.local_enc2 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True)
-        )
-        
-        self.local_enc3 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True)
-        )
-        '''self.local_enc2 = nn.Sequential(
             GatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
                         pad_type='reflect', activation='relu', norm='bn'),
             GatedConv2d(128, 128, kernel_size=3, stride=1, padding=1,
@@ -439,36 +386,21 @@ class CompletionNetwork(nn.Module):
                         pad_type='reflect', activation='relu', norm='bn'),
             GatedConv2d(256, 256, kernel_size=3, stride=1, padding=1,
                         pad_type='reflect', activation='relu', norm='bn'),
-        )'''
+        )
 
-        # Global encoder with PartialGatedConv2d
+        # Global encoder with PartialGatedConv2d - 修正：分解为独立层
         self.global_enc1_conv = PartialGatedConv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2,
                                                   pad_type='reflect', activation='relu', norm='bn')
-        self.global_enc1_pool = PartialMaxPool2d(kernel_size=2, stride=2)
+        self.global_enc1_pool = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        '''self.global_enc2_conv = PartialGatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
+        self.global_enc2_conv = PartialGatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
                                                   pad_type='reflect', activation='relu', norm='bn')
-        self.global_enc2_pool = PartialMaxPool2d(kernel_size=2, stride=2)
+        self.global_enc2_pool = nn.MaxPool2d(kernel_size=2, stride=2)
         
         self.global_enc3_conv1 = PartialGatedConv2d(128, 256, kernel_size=3, stride=2, padding=1,
                                                    pad_type='reflect', activation='relu', norm='bn')
         self.global_enc3_conv2 = PartialGatedConv2d(256, 256, kernel_size=3, stride=2, padding=0,
-                                                   pad_type='reflect', activation='relu', norm='bn')'''
-        self.global_enc2 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        
-        self.global_enc3 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=0),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True)
-        )
+                                                   pad_type='reflect', activation='relu', norm='bn')
 
         # Global attention module for high-level features
         self.global_attention = MaskAttentionModule(256)
@@ -486,46 +418,28 @@ class CompletionNetwork(nn.Module):
 
         self.boundary_aware = BoundaryAwareModule(256)
 
-        # Decoder
-        '''self.decoder1 = TransposeGatedConv2d(256, 128, kernel_size=4, stride=2, padding=1,
-                                            pad_type='reflect', activation='relu', norm='bn', scale_factor=2)'''
-        self.decoder1 = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True)
-        )
-        
+        # Decoder with TransposeGatedConv2d
+        self.decoder1 = TransposeGatedConv2d(256, 128, kernel_size=3, stride=1, padding=1,
+                                            pad_type='reflect', activation='relu', norm='bn', scale_factor=2)
         self.skip_fusion1 = nn.Sequential(
             nn.Conv2d(128 + 128, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True)
         )
 
-        '''self.decoder2 = TransposeGatedConv2d(128, 64, kernel_size=4, stride=2, padding=1,
-                                            pad_type='reflect', activation='relu', norm='bn', scale_factor=2)'''
-        self.decoder2 = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-                                            
+        self.decoder2 = TransposeGatedConv2d(128, 64, kernel_size=3, stride=1, padding=1,
+                                            pad_type='reflect', activation='relu', norm='bn', scale_factor=2)
         self.skip_fusion2 = nn.Sequential(
             nn.Conv2d(64 + 64, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True)
         )
 
-        '''self.decoder3 = nn.Sequential(
+        self.decoder3 = nn.Sequential(
             GatedConv2d(64, 32, kernel_size=3, stride=1, padding=1,
                         pad_type='reflect', activation='relu', norm='bn'),
             GatedConv2d(32, input_channels, kernel_size=3, stride=1, padding=1,
                         pad_type='reflect', activation='none', norm='none'),
-        )'''
-        self.decoder3 = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, input_channels, kernel_size=3, stride=1, padding=1)
         )
 
         # Transition layers
@@ -546,16 +460,11 @@ class CompletionNetwork(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(16, input_channels, kernel_size=3, padding=1)
         )
-        '''self.offset_transition = nn.Sequential(
-            GatedConv2d(input_channels + 1, 16, kernel_size=3, stride=1, padding=1,
-                        pad_type='reflect', activation='relu', norm='bn'),
-            GatedConv2d(16, input_channels, kernel_size=3, stride=1, padding=1,
-                        pad_type='reflect', activation='none', norm='none')
-        )
-'''
+
     def print_sizes(self, tensor, name):
         if self.debug:
-            print(f"{name} size: {tensor.size()}")
+            0
+            #print(f"{name} size: {tensor.size()}")
 
     def forward(self, local_input, local_mask, global_input, global_mask):
         local_mask = local_mask.float()
@@ -571,84 +480,80 @@ class CompletionNetwork(nn.Module):
 
         # Local encoder forward pass with GatedConv2d (no mask input)
         local_feat1 = self.local_enc1(local_x)
-        # self.print_sizes(local_feat1, "local_feat1")
+        self.print_sizes(local_feat1, "local_feat1")
 
         local_feat2 = self.local_enc2(local_feat1)
-        # self.print_sizes(local_feat2, "local_feat2")
+        self.print_sizes(local_feat2, "local_feat2")
 
         local_feat3 = self.local_enc3(local_feat2)
-        # self.print_sizes(local_feat3, "local_feat3")
+        self.print_sizes(local_feat3, "local_feat3")
 
         # Global encoder forward pass with PartialGatedConv2d - 修正版本
         global_mask_current = global_mask
         
         global_feat1, global_mask_current = self.global_enc1_conv(global_x, global_mask_current)
-        global_feat1, global_mask_current = self.global_enc1_pool(global_feat1, global_mask_current)
-        # self.print_sizes(global_feat1, "global_feat1")
+        #global_feat1 = self.global_enc1_pool(global_feat1)
+        self.print_sizes(global_feat1, "global_feat1")
 
-        # global_feat2, global_mask_current = self.global_enc2_conv(global_feat1, global_mask_current)
-        # global_feat2, global_mask_current = self.global_enc2_pool(global_feat2, global_mask_current)
-        # self.print_sizes(global_feat2, "global_feat2")
+        global_feat2, global_mask_current = self.global_enc2_conv(global_feat1, global_mask_current)
+        # global_feat2 = self.global_enc2_pool(global_feat2)
+        self.print_sizes(global_feat2, "global_feat2")
 
-        # global_feat3, global_mask_current = self.global_enc3_conv1(global_feat2, global_mask_current)
-        # self.print_sizes(global_feat3, "global_feat3_conv1")
+        global_feat3, global_mask_current = self.global_enc3_conv1(global_feat2, global_mask_current)
+        self.print_sizes(global_feat3, "global_feat3_conv1")
         
-        # global_feat3, global_mask_current = self.global_enc3_conv2(global_feat3, global_mask_current)
-        # self.print_sizes(global_feat3, "global_feat3_conv2")
-        global_feat2 = self.global_enc2(global_feat1)
-        
-        global_feat3 = self.global_enc3(global_feat2)
+        global_feat3, global_mask_current = self.global_enc3_conv2(global_feat3, global_mask_current)
+        self.print_sizes(global_feat3, "global_feat3_conv2")
 
         # Resize global features to match local features
-        '''global_feat3_resized = F.interpolate(
+        global_feat3_resized = F.interpolate(
             global_feat3, size=local_feat3.size()[2:], mode="bilinear", align_corners=True
         )
         global_mask_resized = F.interpolate(
             global_mask_current, size=local_feat3.size()[2:], mode="bilinear", align_corners=True
-        )'''
-        # self.print_sizes(global_feat3, "global_feat3_resized")
+        )
+        self.print_sizes(global_feat3_resized, "global_feat3_resized")
 
         # Feature fusion
-        combined_features = torch.cat([local_feat3, global_feat3], dim=1)
-        # self.print_sizes(combined_features, "combined_features")
+        combined_features = torch.cat([local_feat3, global_feat3_resized], dim=1)
+        self.print_sizes(combined_features, "combined_features")
 
         fused_features = self.fusion(combined_features)
-        # self.print_sizes(fused_features, "fused_features")
+        self.print_sizes(fused_features, "fused_features")
 
         # Decoder with TransposeGatedConv2d (no mask input)
         dec1 = self.decoder1(fused_features)
-        # self.print_sizes(dec1, "dec1")
+        self.print_sizes(dec1, "dec1")
 
         if dec1.size()[2:] != local_feat2.size()[2:]:
             dec1 = F.interpolate(dec1, size=local_feat2.size()[2:], mode='bilinear', align_corners=True)
-            # self.print_sizes(dec1, "dec1_resized")
+            self.print_sizes(dec1, "dec1_resized")
 
         skip1 = torch.cat([dec1, local_feat2], dim=1)
-        # self.print_sizes(skip1, "skip1")
+        self.print_sizes(skip1, "skip1")
 
         skip1_fused = self.skip_fusion1(skip1)
-        # self.print_sizes(skip1_fused, "skip1_fused")
+        self.print_sizes(skip1_fused, "skip1_fused")
 
         dec2 = self.decoder2(skip1_fused)
-        # self.print_sizes(dec2, "dec2")
+        self.print_sizes(dec2, "dec2")
 
         if dec2.size()[2:] != local_feat1.size()[2:]:
             dec2 = F.interpolate(dec2, size=local_feat1.size()[2:], mode='bilinear', align_corners=True)
-            # self.print_sizes(dec2, "dec2_resized")
+            self.print_sizes(dec2, "dec2_resized")
 
         skip2 = torch.cat([dec2, local_feat1], dim=1)
-        # self.print_sizes(skip2, "skip2")
+        self.print_sizes(skip2, "skip2")
 
         skip2_fused = self.skip_fusion2(skip2)
-        # self.print_sizes(skip2_fused, "skip2_fused")
+        self.print_sizes(skip2_fused, "skip2_fused")
 
         # Final output with GatedConv2d (no mask input)
         output = self.decoder3(skip2_fused)
-        # self.print_sizes(output, "output")
+        self.print_sizes(output, "output")
 
         # Smooth transition
-        # blurred_mask = F.avg_pool2d(local_mask, kernel_size=3, stride=1, padding=1)
-        blurred_mask = smooth_mask_generate(local_mask, 7.0, False)
+        blurred_mask = F.avg_pool2d(local_mask, kernel_size=3, stride=1, padding=1)
         fused_mask = torch.max(blurred_mask, 1 - local_mask)
 
         known_region = local_input * local_mask
@@ -661,7 +566,6 @@ class CompletionNetwork(nn.Module):
 
         offset = self.offset_module(offset_features)
         offset = offset.view(-1, 1, 1, 1)
-        # print("offset value:", offset)
 
         offset_output = output + offset
         transition_input = torch.cat([offset_output, fused_mask], dim=1)
@@ -804,7 +708,7 @@ class GlobalDiscriminator(nn.Module):
         # 计算通道数：原始 + 坡度 + 掩码
         enhanced_channels = input_channels * 2 + 1
         
-        # 创建空间注意力模块 - 替换为PartialGatedConv2d
+        # 创建空间注意力模块 - 使用PartialGatedConv2d替换
         self.spatial_attention_conv1 = PartialGatedConv2d(enhanced_channels, 16, kernel_size=7, 
                                                          stride=1, padding=3, activation='lrelu', 
                                                          norm='bn', sn=True)
@@ -812,7 +716,7 @@ class GlobalDiscriminator(nn.Module):
                                                          stride=1, padding=3, activation='sigmoid', 
                                                          norm='none', sn=True)
         
-        # 第一层卷积 - 替换为PartialGatedConv2d
+        # 第一层卷积 - 使用PartialGatedConv2d
         self.conv1 = PartialGatedConv2d(enhanced_channels, 64, kernel_size=4, stride=2, padding=1,
                                        activation='lrelu', norm='bn', sn=True)
 
@@ -878,7 +782,7 @@ class GlobalDiscriminator(nn.Module):
         # 创建当前掩码进行跟踪
         current_mask = mask
         
-        # 第一层卷积，使用PartialGatedConv2d（集成了归一化和激活）
+        # 第一层卷积，使用PartialGatedConv2d
         x, current_mask = self.conv1(x, current_mask)
         
         # 第二层卷积
@@ -923,7 +827,7 @@ class GlobalDiscriminator(nn.Module):
 
 
 class LocalDiscriminator(nn.Module):
-    """使用GatedConv2d的局部判别器，减少层数和复杂度"""
+    """简化的局部判别器，减少层数和复杂度"""
     def __init__(self, input_channels=1, input_size=33):
         super(LocalDiscriminator, self).__init__()
         self.input_shape = (input_channels, input_size, input_size)
@@ -933,21 +837,25 @@ class LocalDiscriminator(nn.Module):
         # 计算输出通道数：原始 + 坡度
         terrain_channels = input_channels * 2
         
-        # 第一层卷积 - 替换为GatedConv2d
-        self.conv1 = GatedConv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1,
-                                activation='lrelu', norm='bn', sn=True)
-        
+        # 第一层卷积 - 使用谱归一化
+        self.conv1 = spectral_norm(nn.Conv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1))
+        self.bn1 = nn.BatchNorm2d(64)
+        self.act1 = nn.LeakyReLU(0.2, inplace=True)
+
         # 第二层卷积
-        self.conv2 = GatedConv2d(64, 128, kernel_size=4, stride=2, padding=1,
-                                activation='lrelu', norm='bn', sn=True)
+        self.conv2 = spectral_norm(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1))
+        self.bn2 = nn.BatchNorm2d(128)
+        self.act2 = nn.LeakyReLU(0.2, inplace=True)
         
         # 第三层卷积
-        self.conv3 = GatedConv2d(128, 256, kernel_size=4, stride=2, padding=1,
-                                activation='lrelu', norm='bn', sn=True)
-        
+        self.conv3 = spectral_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1))
+        self.bn3 = nn.BatchNorm2d(256)
+        self.act3 = nn.LeakyReLU(0.2, inplace=True)
+
         # 第四层卷积 - 最后一层卷积
-        self.conv4 = GatedConv2d(256, 512, kernel_size=4, stride=2, padding=1,
-                                activation='lrelu', norm='bn', sn=True)
+        self.conv4 = spectral_norm(nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1))
+        self.bn4 = nn.BatchNorm2d(512)
+        self.act4 = nn.LeakyReLU(0.2, inplace=True)
         
         # 全连接层
         self.flatten = nn.Flatten()
@@ -976,17 +884,17 @@ class LocalDiscriminator(nn.Module):
         # 提取地形特征
         x = self.terrain_extractor(local)
         
-        # 第一层卷积 - GatedConv2d（集成了归一化和激活）
-        x = self.conv1(x)
+        # 第一层卷积
+        x = self.act1(self.bn1(self.conv1(x)))
         
         # 第二层卷积
-        x = self.conv2(x)
+        x = self.act2(self.bn2(self.conv2(x)))
         
         # 第三层卷积
-        x = self.conv3(x)
+        x = self.act3(self.bn3(self.conv3(x)))
         
         # 第四层卷积
-        x = self.conv4(x)
+        x = self.act4(self.bn4(self.conv4(x)))
 
         # 特征展平
         x = self.flatten(x)
@@ -1013,9 +921,8 @@ class LocalDiscriminator(nn.Module):
 
         return x
 
-
 class ContextDiscriminator(nn.Module):
-    """上下文判别器，融合Local和Global的1024维特征"""
+    """简化版上下文判别器，移除了权重共享，增加正则化"""
     def __init__(
         self,
         local_input_channels=1,
@@ -1025,41 +932,54 @@ class ContextDiscriminator(nn.Module):
     ):
         super(ContextDiscriminator, self).__init__()
         
-        # 创建局部判别器和全局判别器
+        # 创建简化版局部判别器和全局判别器
         self.model_ld = LocalDiscriminator(
             input_channels=local_input_channels, input_size=local_input_size
         )
         self.model_gd = GlobalDiscriminator(
             input_channels=global_input_channels, input_size=global_input_size
         )
+        
+        # 移除权重共享，避免接口不兼容问题
+        # 不再使用: self.model_ld.conv4 = shared_conv
 
-        # 特征融合层 - 1024 + 1024 = 2048 -> 1024
+        # 扁平化层
+        self.flatten_ld = nn.Flatten()
+        self.flatten_gd = nn.Flatten()
+
+        # 特征融合层 - 增加Dropout和更强的正则化
         self.fusion = nn.Sequential(
             spectral_norm(nn.Linear(1024 + 1024, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.6)
+            nn.Dropout(0.6)  # 增加dropout以提高正则化
         )
 
-        # 分类器
+        # 分类器 - 更简单的架构
         self.classifier = nn.Sequential(
             spectral_norm(nn.Linear(1024, 512)),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.5),
-            spectral_norm(nn.Linear(512, 1))
+            spectral_norm(nn.Linear(512, 1))  # 输出logits，适配BCEWithLogitsLoss
         )
 
     def forward(self, x_ld, x_lm, x_gd, x_gm):
-        # 通过局部和全局判别器，都输出1024维特征
+        # 通过局部和全局判别器
         x_ld = self.model_ld(x_ld, x_lm)  # 1024维特征
         x_gd = self.model_gd(x_gd, x_gm)  # 1024维特征
 
-        # 连接特征 -> 2048维
+        # 确保形状正确
+        if len(x_ld.shape) > 2:
+            x_ld = self.flatten_ld(x_ld)
+        if len(x_gd.shape) > 2:
+            x_gd = self.flatten_gd(x_gd)
+
+        # 连接特征
         combined = torch.cat([x_ld, x_gd], dim=1)
         
-        # 融合特征 -> 1024维
+        # 融合特征
         fused = self.fusion(combined)
 
-        # 分类 -> 1维输出
+        # 输出logits，不使用sigmoid
         logits = self.classifier(fused)
         
         # 检查logits是否包含NaN
@@ -1067,7 +987,7 @@ class ContextDiscriminator(nn.Module):
             print("警告: ContextDiscriminator输出包含NaN!")
             logits = torch.zeros_like(logits, device=logits.device)
 
-        # 返回logits和特征
+        # 为了与原代码兼容，返回logits和特征
         return logits, x_ld, x_gd
     
 if __name__ == "__main__":

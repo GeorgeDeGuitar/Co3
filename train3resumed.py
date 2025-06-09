@@ -49,6 +49,14 @@ def save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, phase, result_dir,
         'best_val_loss': best_val_loss,
         'best_acc': best_acc
     }
+    # 删除旧的模型文件
+    old_files = glob.glob(os.path.join(result_dir, f"checkpoint_phase{phase}_step*"))
+    for file in old_files:
+        try:
+            os.remove(file)
+            print(f"删除旧文件: {os.path.basename(file)}")
+        except Exception as e:
+            print(f"删除文件失败: {e}")
     
     checkpoint_path = os.path.join(result_dir, f"checkpoint_phase{phase}_step{step}.pth")
     torch.save(checkpoint, checkpoint_path)
@@ -155,7 +163,7 @@ def train(resume_from=None):
 
     snaperiod_1 =2000   # 10000  # How often to save snapshots in phase 1
     snaperiod_2 = 2000 # 2000  # How often to save snapshots in phase 2
-    snaperiod_3 = 1000   # 10000  # How often to save snapshots in phase 3
+    snaperiod_3 = 500   # 10000  # How often to save snapshots in phase 3
 
     batch_size = 8  # Batch size
     alpha = 4e-1  # Alpha parameter for loss weighting
@@ -167,7 +175,7 @@ def train(resume_from=None):
     # Hardware setup
     if not torch.cuda.is_available():
         raise Exception("At least one GPU must be available.")
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:1")
     #device = torch.device("cpu")
 
     # Initialize Visdom
@@ -190,9 +198,12 @@ def train(resume_from=None):
             opts=dict(title="Phase 2 Discriminator Loss"),
         ),
         "phase2_acc": viz.line(
-            Y=torch.zeros(1),
+            Y=torch.zeros((1,3)),
             X=torch.zeros(1),
-            opts=dict(title="Phase 2 Discriminator Accuracy"),
+            opts=dict(title="Phase 2 Discriminator Accuracy",
+                      legend = ['avg acc', 'fake acc', 'real acc'],
+                      linecolor=np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]]),
+                      ),
         ),
         "phase3_gen": viz.line(
             Y=torch.zeros(1),
@@ -256,14 +267,16 @@ def train(resume_from=None):
 
     # Create data loaders with custom collate function
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn,num_workers=8,pin_memory=True
+        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn,num_workers=2,pin_memory=True
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn,num_workers=8,pin_memory=True
+        val_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn,num_workers=2,pin_memory=True
     )
-    val_subset = torch.utils.data.Subset(val_loader.dataset, range(0, 30))
-    val_subset_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn,num_workers=8,pin_memory=True)
+    # 随机挑选30个验证样本
+    val_indices = np.random.choice(len(val_loader.dataset), size=100, replace=False)
+    val_subset = torch.utils.data.Subset(val_loader.dataset, val_indices)
+    val_subset_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn, num_workers=2, pin_memory=True)
 
     print(f"Training dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
@@ -327,12 +340,12 @@ def train(resume_from=None):
                 print(f"Phase2: Loaded pre-trained weights from {pretrained_weights_path}")
         elif phase==3:
             # Load pre-trained weights if available
-            pretrained_weights_path_cn= r"E:\KingCrimson Dataset\Simulate\data0\results13\phase_1\model_cn_best"
+            pretrained_weights_path_cn= r"E:\KingCrimson Dataset\Simulate\data0\results\phase_1\model_cn_step100000"
             if os.path.exists(pretrained_weights_path_cn):
                 model_cn.load_state_dict(torch.load(pretrained_weights_path_cn, map_location=device))
                 print(f"Phase3: Loaded pre-trained weights from {pretrained_weights_path_cn}")
                 
-            pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\resultsphase2\phase_2\model_cd_best"
+            pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results\phase_2_2\model_cd_step22000"
             if os.path.exists(pretrained_weights_path_cd):
                 model_cd.load_state_dict(torch.load(pretrained_weights_path_cd, map_location=device))
                 print(f"Phase3: Loaded pre-trained weights from {pretrained_weights_path_cd}")
@@ -739,6 +752,7 @@ def train(resume_from=None):
         model_cn.train()
         pbar = tqdm(total=steps_1, initial=step_phase1)
         step = step_phase1
+        scaler = GradScaler()  # 初始化梯度缩放器
 
     # step = 0
         while step < steps_1:
@@ -779,8 +793,9 @@ def train(resume_from=None):
                 )
 
                 # Backward and optimize
-                loss.backward()
-                opt_cn.step()
+                scaler.scale(loss).backward()
+                scaler.step(opt_cn)
+                scaler.update()
                 opt_cn.zero_grad()
 
                 # Update Visdom plot for training loss
@@ -800,6 +815,7 @@ def train(resume_from=None):
                 step += 1
                 pbar.set_description(f"Phase 1 | train loss: {loss.item():.5f}")
                 pbar.update(1)
+                torch.cuda.empty_cache()  # 每步清理显存缓存
 
                 # Testing and saving snapshots
                 if step % snaperiod_1 == 0:
@@ -878,13 +894,14 @@ def train(resume_from=None):
                         model_path = os.path.join(result_dir, "phase_1", f"model_cn_step{step}")
                         torch.save(model_cn.state_dict(), model_path)
 
+                    
                     model_cn.train()
 
                 if step >= steps_1:
                     break
 
         pbar.close()
-    phase = 2  # 切换到第二阶段
+        phase = 2  # 切换到第二阶段
 
     # =================================================
     # Training Phase 2: Train Context Discriminator only
@@ -1173,7 +1190,7 @@ def train(resume_from=None):
         opt_cd = torch.optim.Adam(model_cd.parameters(), lr=2e-5, betas=(0.5, 0.999), eps=1e-8)
         
         # 创建梯度缩放器，用于自动混合精度训练
-        scaler = GradScaler(enabled=True)
+        scaler2 = GradScaler(enabled=True)
         
         # 创建学习率调度器
         from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -1189,7 +1206,7 @@ def train(resume_from=None):
         running_fake_acc = 0.0
         # best_acc = float('-inf')
         patience_counter = 0
-        max_patience = 10
+        max_patience = 5
         
         pbar = tqdm(total=steps_2, initial=step_phase2)
         step = step_phase2
@@ -1312,18 +1329,18 @@ def train(resume_from=None):
                         0
 
                     loss = loss_real + loss_fake + fm_loss + lsb_loss + r1_loss # + gp_loss
-                    print(f"loss_real: {loss_real}, loss_fake: {loss_fake}, fm_loss: {fm_loss}, r1_loss: {r1_loss}")
+                    # print(f"loss_real: {loss_real}, loss_fake: {loss_fake}, fm_loss: {fm_loss}, r1_loss: {r1_loss}")
                 
                 # 使用梯度缩放器进行反向传播
-                scaler.scale(loss).backward()
+                scaler2.scale(loss).backward()
                 
                 # 梯度裁剪
-                scaler.unscale_(opt_cd)
+                scaler2.unscale_(opt_cd)
                 # torch.nn.utils.clip_grad_norm_(model_cd.parameters(), 1.0)
                 
                 # 更新参数
-                scaler.step(opt_cd)
-                scaler.update()
+                scaler2.step(opt_cd)
+                scaler2.update()
                 opt_cd.zero_grad(set_to_none=True)  # 更彻底地清理梯度
                 
                 # 更新学习率
@@ -1367,7 +1384,7 @@ def train(resume_from=None):
                 )
                 
                 viz.line(
-                    Y=torch.tensor([avg_acc]),
+                    Y=torch.tensor([[avg_acc, real_acc, fake_acc]]),
                     X=torch.tensor([step]),
                     win=loss_windows["phase2_acc"],
                     update="append",
@@ -1710,7 +1727,7 @@ def train(resume_from=None):
                 
                 # 组合判别器损失
                 loss_cd = ((loss_cd_fake + loss_cd_real) / 2.0 + 
-                            fm_loss_d + lsb_loss) * alpha_d + r1_loss
+                            fm_loss_d + lsb_loss + r1_loss) * alpha_d
             
                 # Update Visdom plot for discriminator loss
                 viz.line(
@@ -1769,7 +1786,7 @@ def train(resume_from=None):
                     real_lf.detach(), real_gf.detach(), fake_lf, fake_gf) * fm_weight
                 
                 # 组合生成器损失
-                loss_cn = loss_cn_recon + alpha_g * loss_cn_adv + fm_loss_g
+                loss_cn = loss_cn_recon + alpha_g * (loss_cn_adv + fm_loss_g)
                 
                 # 反向传播和优化
                 opt_cn.zero_grad()
@@ -2012,7 +2029,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=None, help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results\checkpoint_phase3_step1000.pth", help="resume from checkpoint path")
     args = parser.parse_args()
     
     train(resume_from=args.resume)

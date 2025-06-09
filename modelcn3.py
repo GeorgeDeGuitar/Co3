@@ -352,6 +352,55 @@ class EarlyAttentionModule(nn.Module):
         combined = torch.cat([x, mask], dim=1)
         attention = self.sigmoid(self.conv(combined))
         return x * attention
+'''# 方案3：针对DEM任务优化的版本
+class EarlyAttentionModule(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=4):
+        super(EarlyAttentionModule, self).__init__()
+        
+        # 使用更小的中间层，减少参数
+        mid_channels = max(1, in_channels // reduction_ratio)
+        
+        # 第一层：降维 + gated convolution
+        self.conv1 = GatedConv2d(
+            in_channels + 1, 
+            mid_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            pad_type='zero',
+            activation='relu',    # 中间层使用ReLU
+            norm='bn',           # 使用批归一化稳定训练
+            sn=False
+        )
+        
+        # 第二层：升维 + 输出attention
+        self.conv2 = GatedConv2d(
+            mid_channels,
+            in_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            pad_type='zero',
+            activation='none',   # 输出层不使用激活
+            norm='none',
+            sn=False
+        )
+        
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, mask):
+        # 输入特征和mask的融合
+        combined = torch.cat([x, mask], dim=1)
+        
+        # 两层gated convolution
+        attention = self.conv1(combined)
+        attention = self.conv2(attention)
+        
+        # 生成attention权重
+        attention = self.sigmoid(attention)
+        
+        # 应用attention
+        return x * attention'''
 
 class MaskAttentionModule(nn.Module):
     def __init__(self, in_channels):
@@ -402,9 +451,14 @@ class CompletionNetwork(nn.Module):
         self.early_global_attention = EarlyAttentionModule(input_channels)
 
         # Local encoder with GatedConv2d
-        self.local_enc1 = nn.Sequential(
+        '''self.local_enc1 = nn.Sequential(
             GatedConv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2,
                         pad_type='reflect', activation='relu', norm='bn'),
+        )'''
+        self.local_enc1 = nn.Sequential(
+            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
         )
         self.local_enc2 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
@@ -442,11 +496,17 @@ class CompletionNetwork(nn.Module):
         )'''
 
         # Global encoder with PartialGatedConv2d
-        self.global_enc1_conv = PartialGatedConv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2,
+        self.global_enc1 = nn.Sequential(
+            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        '''self.global_enc1_conv = PartialGatedConv2d(input_channels * 2, 64, kernel_size=5, stride=2, padding=2,
                                                   pad_type='reflect', activation='relu', norm='bn')
         self.global_enc1_pool = PartialMaxPool2d(kernel_size=2, stride=2)
         
-        '''self.global_enc2_conv = PartialGatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
+        self.global_enc2_conv = PartialGatedConv2d(64, 128, kernel_size=3, stride=2, padding=1,
                                                   pad_type='reflect', activation='relu', norm='bn')
         self.global_enc2_pool = PartialMaxPool2d(kernel_size=2, stride=2)
         
@@ -490,7 +550,7 @@ class CompletionNetwork(nn.Module):
         '''self.decoder1 = TransposeGatedConv2d(256, 128, kernel_size=4, stride=2, padding=1,
                                             pad_type='reflect', activation='relu', norm='bn', scale_factor=2)'''
         self.decoder1 = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True)
         )
@@ -504,7 +564,7 @@ class CompletionNetwork(nn.Module):
         '''self.decoder2 = TransposeGatedConv2d(128, 64, kernel_size=4, stride=2, padding=1,
                                             pad_type='reflect', activation='relu', norm='bn', scale_factor=2)'''
         self.decoder2 = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True)
         )
@@ -582,8 +642,9 @@ class CompletionNetwork(nn.Module):
         # Global encoder forward pass with PartialGatedConv2d - 修正版本
         global_mask_current = global_mask
         
-        global_feat1, global_mask_current = self.global_enc1_conv(global_x, global_mask_current)
-        global_feat1, global_mask_current = self.global_enc1_pool(global_feat1, global_mask_current)
+        global_feat1 = self.global_enc1(global_x)
+        # global_feat1, global_mask_current = self.global_enc1_conv(global_x, global_mask_current)
+        # global_feat1, global_mask_current = self.global_enc1_pool(global_feat1, global_mask_current)
         # self.print_sizes(global_feat1, "global_feat1")
 
         # global_feat2, global_mask_current = self.global_enc2_conv(global_feat1, global_mask_current)
@@ -619,8 +680,8 @@ class CompletionNetwork(nn.Module):
         dec1 = self.decoder1(fused_features)
         # self.print_sizes(dec1, "dec1")
 
-        if dec1.size()[2:] != local_feat2.size()[2:]:
-            dec1 = F.interpolate(dec1, size=local_feat2.size()[2:], mode='bilinear', align_corners=True)
+        '''if dec1.size()[2:] != local_feat2.size()[2:]:
+            dec1 = F.interpolate(dec1, size=local_feat2.size()[2:], mode='bilinear', align_corners=True)'''
             # self.print_sizes(dec1, "dec1_resized")
 
         skip1 = torch.cat([dec1, local_feat2], dim=1)
@@ -632,8 +693,8 @@ class CompletionNetwork(nn.Module):
         dec2 = self.decoder2(skip1_fused)
         # self.print_sizes(dec2, "dec2")
 
-        if dec2.size()[2:] != local_feat1.size()[2:]:
-            dec2 = F.interpolate(dec2, size=local_feat1.size()[2:], mode='bilinear', align_corners=True)
+        '''if dec2.size()[2:] != local_feat1.size()[2:]:
+            dec2 = F.interpolate(dec2, size=local_feat1.size()[2:], mode='bilinear', align_corners=True)'''
             # self.print_sizes(dec2, "dec2_resized")
 
         skip2 = torch.cat([dec2, local_feat1], dim=1)
@@ -651,7 +712,7 @@ class CompletionNetwork(nn.Module):
         blurred_mask = smooth_mask_generate(local_mask, 7.0, False)
         fused_mask = torch.max(blurred_mask, 1 - local_mask)
 
-        known_region = local_input * local_mask
+        '''known_region = local_input * local_mask
         generated_region = output * (1 - local_mask)
 
         offset_features = torch.cat([
@@ -663,8 +724,8 @@ class CompletionNetwork(nn.Module):
         offset = offset.view(-1, 1, 1, 1)
         # print("offset value:", offset)
 
-        offset_output = output + offset
-        transition_input = torch.cat([offset_output, fused_mask], dim=1)
+        offset_output = output + offset'''
+        transition_input = torch.cat([output, fused_mask], dim=1)
         smoothed_output = self.offset_transition(transition_input)
 
         final_output = (local_input * local_mask + smoothed_output * (1 - local_mask))

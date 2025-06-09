@@ -341,7 +341,7 @@ class TransposeGatedConv2d(nn.Module):
         x = self.gated_conv2d(x)
         return x
 
-class EarlyAttentionModule(nn.Module):
+'''class EarlyAttentionModule(nn.Module):
     def __init__(self, in_channels):
         super(EarlyAttentionModule, self).__init__()
         self.conv = nn.Conv2d(in_channels + 1, in_channels, kernel_size=1)
@@ -351,6 +351,55 @@ class EarlyAttentionModule(nn.Module):
         # mask_resized = F.interpolate(mask, size=x.shape[2:], mode='bilinear', align_corners=True)
         combined = torch.cat([x, mask], dim=1)
         attention = self.sigmoid(self.conv(combined))
+        return x * attention'''
+# 方案3：针对DEM任务优化的版本
+class EarlyAttentionModule(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=4):
+        super(EarlyAttentionModule, self).__init__()
+        
+        # 使用更小的中间层，减少参数
+        mid_channels = max(1, in_channels // reduction_ratio)
+        
+        # 第一层：降维 + gated convolution
+        self.conv1 = GatedConv2d(
+            in_channels + 1, 
+            mid_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            pad_type='zero',
+            activation='relu',    # 中间层使用ReLU
+            norm='bn',           # 使用批归一化稳定训练
+            sn=False
+        )
+        
+        # 第二层：升维 + 输出attention
+        self.conv2 = GatedConv2d(
+            mid_channels,
+            in_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            pad_type='zero',
+            activation='none',   # 输出层不使用激活
+            norm='none',
+            sn=False
+        )
+        
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, mask):
+        # 输入特征和mask的融合
+        combined = torch.cat([x, mask], dim=1)
+        
+        # 两层gated convolution
+        attention = self.conv1(combined)
+        attention = self.conv2(attention)
+        
+        # 生成attention权重
+        attention = self.sigmoid(attention)
+        
+        # 应用attention
         return x * attention
 
 class MaskAttentionModule(nn.Module):
@@ -402,9 +451,14 @@ class CompletionNetwork(nn.Module):
         self.early_global_attention = EarlyAttentionModule(input_channels)
 
         # Local encoder with GatedConv2d
-        self.local_enc1 = nn.Sequential(
+        '''self.local_enc1 = nn.Sequential(
             GatedConv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2,
                         pad_type='reflect', activation='relu', norm='bn'),
+        )'''
+        self.local_enc1 = nn.Sequential(
+            nn.Conv2d(input_channels * 2, 64, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
         )
         self.local_enc2 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
