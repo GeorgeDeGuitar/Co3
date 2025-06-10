@@ -1567,19 +1567,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                 raise
 
         # =================================================
-        # Training Phase 3: Joint training of both networks
+        # Training Phase 3: 优化后的联合训练
         # =================================================
-
-        def random_label_flip(labels, flip_prob=0.1):
-            """随机翻转一部分标签"""
-            flipped_labels = labels.clone()
-            flip_mask = (torch.rand_like(labels) < flip_prob).float()
-            flipped_labels = labels * (1 - flip_mask) + (1 - labels) * flip_mask
-            return flipped_labels
-
-        def check_discriminator_collapse(real_acc, fake_acc, threshold=0.2):
-            """检查判别器是否崩溃"""
-            return real_acc < threshold or (1 - fake_acc) < threshold
 
         if step_phase3 < steps_3 and phase == 3:
             print("开始/继续第3阶段训练...")
@@ -1588,478 +1577,348 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                 pbar = tqdm(total=steps_3, initial=step_phase3)
                 step = step_phase3
                 
-                # Phase 3 判别器设置 - 与Phase 2保持一致
-                # 不重新创建优化器，保持连续性
-                if 'opt_cd' not in locals() or opt_cd is None:
-                    opt_cd = torch.optim.Adam(model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8)
+                # ==================== 优化配置 ====================
+                # 梯度累积设置
+                target_batch_size = 32
+                actual_batch_size = batch_size  # 当前的batch_size (8)
+                accumulation_steps = target_batch_size // actual_batch_size  # 2
+                print(f"使用梯度累积: {accumulation_steps} steps, 有效batch size: {target_batch_size}")
+                
+                # 重新初始化优化器 - 使用更保守的学习率
+                opt_cn = torch.optim.Adam(model_cn.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8)
+                opt_cd = torch.optim.Adam(model_cd.parameters(), lr=5e-6, betas=(0.5, 0.999), eps=1e-8)
                 
                 # 创建梯度缩放器
-                if 'scaler2' not in locals():
-                    scaler2 = GradScaler(enabled=True)
+                scaler_cn = GradScaler(enabled=True, init_scale=2**10, growth_interval=2000)
+                scaler_cd = GradScaler(enabled=True, init_scale=2**10, growth_interval=2000)
                 
-                # 学习率调度器 - 使用与Phase 2相同的类型
-                scheduler_d = CosineAnnealingLR(opt_cd, T_max=steps_3, eta_min=1e-6)
-                scheduler_g = CosineAnnealingLR(opt_cn, T_max=steps_3, eta_min=1e-6)
+                # 学习率调度器
+                scheduler_cn = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    opt_cn, mode='min', factor=0.7, patience=8, min_lr=1e-6
+                )
+                scheduler_cd = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    opt_cd, mode='max', factor=0.7, patience=5, min_lr=1e-7
+                )
                 
-                # Phase 3 的其他设置
-                alpha_d = 1.0  # 判别器权重
-                alpha_g = 0.1  # 生成器权重
-                fm_weight = 4  # 与Phase 2保持一致
+                # 稳定性追踪器
+                class StabilityTracker:
+                    def __init__(self):
+                        self.real_acc_ema = 0.5
+                        self.fake_acc_ema = 0.5
+                        self.recon_loss_ema = float('inf')
+                        self.alpha = 0.95
+                        self.collapse_threshold = 0.15
+                        self.recovery_steps = 0
+                        
+                    def update(self, real_acc, fake_acc, recon_loss):
+                        self.real_acc_ema = self.alpha * self.real_acc_ema + (1 - self.alpha) * real_acc
+                        self.fake_acc_ema = self.alpha * self.fake_acc_ema + (1 - self.alpha) * fake_acc
+                        self.recon_loss_ema = self.alpha * self.recon_loss_ema + (1 - self.alpha) * recon_loss
+                        
+                    def is_collapsed(self):
+                        return (self.real_acc_ema < self.collapse_threshold or 
+                            self.fake_acc_ema < self.collapse_threshold)
+                            
+                    def get_loss_weights(self):
+                        if self.real_acc_ema < 0.25 and self.fake_acc_ema > 0.75:
+                            return 3.0, 0.3  # 加强真实样本权重
+                        elif self.fake_acc_ema < 0.25 and self.real_acc_ema > 0.75:
+                            return 0.3, 3.0  # 加强假样本权重
+                        else:
+                            return 1.0, 1.0
                 
-                # 噪声设置 - 与Phase 2保持一致
-                start_noise = 0.1
+                stability_tracker = StabilityTracker()
+                
+                # 损失权重
+                alpha_d = 1.0
+                alpha_g = 0.08  # 降低对抗损失权重
+                fm_weight = 2.0  # 降低特征匹配权重
+                
+                # 噪声设置
+                start_noise = 0.05  # 降低初始噪声
                 min_noise = 0.001
                 
-                good_state = copy.deepcopy(model_cd.state_dict())
-                patience_counter = 0
-                max_patience = 10
+                # 累积变量
+                accumulated_step = 0
+                running_metrics = {
+                    'recon_loss': 0.0, 'adv_loss': 0.0, 'disc_loss': 0.0,
+                    'real_acc': 0.0, 'fake_acc': 0.0, 'count': 0
+                }
                 
-                # 主训练循环
+                # ==================== 主训练循环 ====================
                 while step < steps_3:
                     for batch in train_loader:
                         try:
-                            # 定期检查内存
-                            if step % 50 == 0:
-                                check_memory_and_cleanup(threshold_gb=8.0)
+                            # 减少内存检查频率
+                            if step % 500 == 0:
+                                check_memory_and_cleanup(threshold_gb=12.0)
                             
                             # 准备数据
                             batch_data = prepare_batch_data(batch, device)
                             (batch_local_inputs, batch_local_masks, batch_local_targets,
                             batch_global_inputs, batch_global_masks, batch_global_targets, metadata) = batch_data
                             
-                            # --------------------------------------
-                            # 1. 训练判别器 - 与Phase 2保持一致
-                            # --------------------------------------
-                            # 冻结生成器参数
+                            batch_size = batch_local_targets.size(0)
+                            noise_level = max(min_noise, start_noise * (1.0 - step / steps_3))
+                            
+                            # ==================== 训练判别器 ====================
                             for param in model_cn.parameters():
                                 param.requires_grad = False
-                            
-                            # 启用判别器梯度
                             for param in model_cd.parameters():
                                 param.requires_grad = True
                             
-                            # 使用自动混合精度 - 与Phase 2一致
                             with autocast(device_type=device.type, dtype=torch.float32, enabled=True):
                                 # 生成假样本
                                 with torch.no_grad():
                                     fake_outputs = safe_tensor_operation(
-                                        model_cn,
-                                        batch_local_inputs,
-                                        batch_local_masks,
-                                        batch_global_inputs,
-                                        batch_global_masks
+                                        model_cn, batch_local_inputs, batch_local_masks,
+                                        batch_global_inputs, batch_global_masks
                                     )
                                 
-                                # 计算当前噪声水平 - 与Phase 2保持一致
-                                noise_level = max(min_noise, start_noise * (1.0 - step / steps_3))
-                                
-                                # 应用实例噪声 - 与Phase 2保持一致
+                                # 应用适度噪声
                                 batch_local_targets_noisy = batch_local_targets + torch.randn_like(batch_local_targets) * noise_level
                                 fake_outputs_noisy = fake_outputs + torch.randn_like(fake_outputs) * noise_level
                                 
-                                # 嵌入到全局 - 与Phase 2保持一致
+                                # 嵌入到全局
                                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
                                     fake_outputs_noisy, batch_global_inputs, batch_global_masks, metadata)
                                 real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
                                     batch_local_targets_noisy, batch_global_inputs, batch_global_masks, metadata)
                                 
-                                # 创建平滑标签 - 与Phase 2保持一致
-                                batch_size = batch_local_targets.size(0)
-                                real_labels = torch.ones(batch_size, 1, device=device) * 0.95
-                                fake_labels = torch.zeros(batch_size, 1, device=device) + 0.05
+                                # 标签平滑
+                                real_labels = torch.ones(batch_size, 1, device=device) * 0.9
+                                fake_labels = torch.zeros(batch_size, 1, device=device) + 0.1
                                 
-                                # 判别器前向传播 - 与Phase 2保持一致
+                                # 判别器前向传播
                                 fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
-                                    model_cd,
-                                    fake_outputs_noisy,
-                                    batch_local_masks,
-                                    fake_global_embedded,
-                                    fake_global_mask_embedded
+                                    model_cd, fake_outputs_noisy, batch_local_masks,
+                                    fake_global_embedded, fake_global_mask_embedded
                                 )
-                                
                                 real_predictions, real_lf, real_gf = safe_tensor_operation(
-                                    model_cd,
-                                    batch_local_targets_noisy,
-                                    batch_local_masks,
-                                    real_global_embedded,
-                                    real_global_mask_embedded
+                                    model_cd, batch_local_targets_noisy, batch_local_masks,
+                                    real_global_embedded, real_global_mask_embedded
                                 )
                                 
-                                # 损失计算 - 与Phase 2保持一致
-                                loss_cd_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)
-                                loss_cd_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)
-                                
-                                # 特征匹配损失 - 与Phase 2保持一致
-                                fm_loss_d = feature_contrastive_loss(
-                                    real_lf, real_gf, fake_lf, fake_gf) * fm_weight
-                                lsb_loss = log_scale_balance_loss(loss_cd_real, loss_cd_fake)
-                                r1_loss = r1_regularization(
-                                    model_cd,
-                                    batch_local_targets_noisy,
-                                    batch_local_masks,
-                                    real_global_embedded,
-                                    real_global_mask_embedded
-                                )
-                                
-                                # 计算准确率 - 与Phase 2保持一致
+                                # 计算准确率
                                 with torch.no_grad():
                                     real_probs = torch.sigmoid(real_predictions)
                                     fake_probs = torch.sigmoid(fake_predictions)
-                                    
                                     real_acc = (real_probs >= 0.5).float().mean().item()
                                     fake_acc = (fake_probs < 0.5).float().mean().item()
-                                    avg_acc = (real_acc + fake_acc) / 2
                                 
-                                # 动态调整损失权重 - 与Phase 2保持一致
-                                if real_acc < 0.1 and fake_acc > 0.9:
-                                    loss_cd_real *= 5.0
-                                    loss_cd_fake *= 0.5
-                                    print("loss real weight strengthened")
-                                elif fake_acc < 0.1 and real_acc > 0.9:
-                                    loss_cd_real *= 0.5
-                                    loss_cd_fake *= 5.0
-                                    print("loss fake weight strengthened")
+                                # 获取动态权重
+                                real_weight, fake_weight = stability_tracker.get_loss_weights()
                                 
-                                # 组合判别器损失
-                                loss_cd = (loss_cd_real + loss_cd_fake + fm_loss_d + lsb_loss + r1_loss) * alpha_d
+                                # 计算损失
+                                loss_cd_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels) * real_weight
+                                loss_cd_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels) * fake_weight
+                                
+                                # 特征对比损失（减少权重）
+                                fm_loss_d = feature_contrastive_loss(real_lf, real_gf, fake_lf, fake_gf) * fm_weight
+                                
+                                # 组合判别器损失并标准化
+                                loss_cd = (loss_cd_real + loss_cd_fake + fm_loss_d) * alpha_d / accumulation_steps
                             
-                            # 判别器反向传播 - 与Phase 2保持一致
-                            scaler2.scale(loss_cd).backward()
-                            scaler2.unscale_(opt_cd)
-                            torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
-                            scaler2.step(opt_cd)
-                            scaler2.update()
-                            opt_cd.zero_grad(set_to_none=True)
+                            # 判别器反向传播
+                            scaler_cd.scale(loss_cd).backward()
                             
-                            # 更新判别器学习率
-                            scheduler_d.step()
-                            
-                            # 清理判别器训练的临时变量
-                            del loss_cd_real, loss_cd_fake, fm_loss_d, lsb_loss, r1_loss
-                            del real_predictions, fake_predictions, real_lf, real_gf, fake_lf, fake_gf
-                            del real_global_embedded, real_global_mask_embedded
-                            del fake_global_embedded, fake_global_mask_embedded
-                            del batch_local_targets_noisy, fake_outputs_noisy
-                            
-                            # --------------------------------------
-                            # 2. 训练生成器
-                            # --------------------------------------
-                            # 解冻生成器参数
+                            # ==================== 训练生成器 ====================
                             for param in model_cn.parameters():
                                 param.requires_grad = True
-                            
-                            # 冻结判别器参数
                             for param in model_cd.parameters():
                                 param.requires_grad = False
                             
-                            # 生成假样本
-                            fake_outputs = safe_tensor_operation(
-                                model_cn,
-                                batch_local_inputs,
-                                batch_local_masks,
-                                batch_global_inputs,
-                                batch_global_masks
-                            )
-                            fake_completed, fake_completed_mask, pos = merge_local_to_global(
-                                fake_outputs, batch_global_inputs, batch_global_masks, metadata
-                            )
+                            with autocast(device_type=device.type, dtype=torch.float32, enabled=True):
+                                # 重新生成（需要梯度）
+                                fake_outputs = safe_tensor_operation(
+                                    model_cn, batch_local_inputs, batch_local_masks,
+                                    batch_global_inputs, batch_global_masks
+                                )
+                                
+                                # 重建损失
+                                fake_completed, fake_completed_mask, pos = merge_local_to_global(
+                                    fake_outputs, batch_global_inputs, batch_global_masks, metadata
+                                )
+                                loss_cn_recon = completion_network_loss(
+                                    fake_outputs, batch_local_targets, batch_local_masks,
+                                    batch_global_targets, fake_completed, fake_completed_mask, pos
+                                )
+                                
+                                # 对抗损失
+                                fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
+                                    fake_outputs, batch_global_inputs, batch_global_masks, metadata
+                                )
+                                fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
+                                    model_cd, fake_outputs, batch_local_masks,
+                                    fake_global_embedded, fake_global_mask_embedded
+                                )
+                                loss_cn_adv = F.binary_cross_entropy_with_logits(fake_predictions, real_labels)
+                                
+                                # 组合生成器损失并标准化
+                                loss_cn = (loss_cn_recon + alpha_g * loss_cn_adv) / accumulation_steps
                             
-                            # 计算重建损失
-                            loss_cn_recon = completion_network_loss(
-                                fake_outputs, batch_local_targets, batch_local_masks,
-                                batch_global_targets, fake_completed, fake_completed_mask, pos)
+                            # 生成器反向传播
+                            scaler_cn.scale(loss_cn).backward()
                             
-                            # 计算对抗损失
-                            fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
-                                fake_outputs, batch_global_inputs, batch_global_masks, metadata)
-                            fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
-                                model_cd,
-                                fake_outputs,
-                                batch_local_masks,
-                                fake_global_embedded,
-                                fake_global_mask_embedded
-                            )
-                            loss_cn_adv = F.binary_cross_entropy_with_logits(fake_predictions, real_labels)
+                            # ==================== 累积梯度更新 ====================
+                            accumulated_step += 1
                             
-                            # 特征匹配损失
-                            with torch.no_grad():
-                                real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
-                                    batch_local_targets, batch_global_inputs, batch_global_masks, metadata)
-                                _, real_lf_detached, real_gf_detached = model_cd(
-                                    batch_local_targets, batch_local_masks,
-                                    real_global_embedded, real_global_mask_embedded)
+                            # 更新运行指标
+                            running_metrics['recon_loss'] += loss_cn_recon.item()
+                            running_metrics['adv_loss'] += loss_cn_adv.item()
+                            running_metrics['disc_loss'] += (loss_cd_real + loss_cd_fake).item()
+                            running_metrics['real_acc'] += real_acc
+                            running_metrics['fake_acc'] += fake_acc
+                            running_metrics['count'] += 1
                             
-                            fm_loss_g = feature_contrastive_loss(
-                                real_lf_detached, real_gf_detached, fake_lf, fake_gf) * fm_weight
-                            
-                            # 组合生成器损失
-                            loss_cn = loss_cn_recon + alpha_g * (loss_cn_adv + fm_loss_g)
-                            
-                            # 生成器反向传播和优化
-                            opt_cn.zero_grad(set_to_none=True)
-                            loss_cn.backward()
-                            torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
-                            opt_cn.step()
-                            
-                            # 更新生成器学习率
-                            scheduler_g.step()
+                            # 每accumulation_steps或到达epoch末尾时更新参数
+                            if accumulated_step % accumulation_steps == 0 or accumulated_step == len(train_loader):
+                                # 更新判别器
+                                scaler_cd.unscale_(opt_cd)
+                                torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=0.5)
+                                scaler_cd.step(opt_cd)
+                                scaler_cd.update()
+                                opt_cd.zero_grad(set_to_none=True)
+                                
+                                # 更新生成器
+                                scaler_cn.unscale_(opt_cn)
+                                torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
+                                scaler_cn.step(opt_cn)
+                                scaler_cn.update()
+                                opt_cn.zero_grad(set_to_none=True)
+                                
+                                # 更新稳定性追踪器
+                                avg_recon = running_metrics['recon_loss'] / running_metrics['count']
+                                avg_real_acc = running_metrics['real_acc'] / running_metrics['count']
+                                avg_fake_acc = running_metrics['fake_acc'] / running_metrics['count']
+                                stability_tracker.update(avg_real_acc, avg_fake_acc, avg_recon)
+                                
+                                # 重置运行指标
+                                for key in running_metrics:
+                                    running_metrics[key] = 0.0
                             
                             # 解除参数冻结
                             for param in model_cd.parameters():
                                 param.requires_grad = True
                             
-                            # 更新可视化和进度条
-                            # 更新可视化和进度条
+                            # ==================== 可视化和进度更新 ====================
                             if viz is not None:
                                 try:
                                     if "phase3_disc" in loss_windows:
-                                        viz.line(
-                                            Y=torch.tensor([loss_cd.item()]),
-                                            X=torch.tensor([step]),
-                                            win=loss_windows["phase3_disc"],
-                                            update="append",
-                                        )
+                                        viz.line(Y=torch.tensor([loss_cd.item() * accumulation_steps]),
+                                                X=torch.tensor([step]), win=loss_windows["phase3_disc"], update="append")
                                     if "phase3_gen" in loss_windows:
-                                        viz.line(
-                                            Y=torch.tensor([loss_cn.item()]),
-                                            X=torch.tensor([step]),
-                                            win=loss_windows["phase3_gen"],
-                                            update="append",
-                                        )
+                                        viz.line(Y=torch.tensor([loss_cn.item() * accumulation_steps]),
+                                                X=torch.tensor([step]), win=loss_windows["phase3_gen"], update="append")
                                     if "phase3_fake_acc" in loss_windows:
-                                        viz.line(
-                                            Y=torch.tensor([[fake_acc, real_acc]]),
-                                            X=torch.tensor([step]),
-                                            win=loss_windows["phase3_fake_acc"],
-                                            update="append",
-                                        )
+                                        viz.line(Y=torch.tensor([[fake_acc, real_acc]]),
+                                                X=torch.tensor([step]), win=loss_windows["phase3_fake_acc"], update="append")
                                 except:
                                     pass
                             
                             step += 1
                             pbar.set_description(
-                                f"Phase 3 | D loss: {loss_cd.item():.5f}, G loss: {loss_cn.item():.5f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}"
+                                f"Phase 3 | D: {(loss_cd.item() * accumulation_steps):.4f}, "
+                                f"G: {(loss_cn.item() * accumulation_steps):.4f}, "
+                                f"R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, "
+                                f"EMA_R: {stability_tracker.real_acc_ema:.3f}, EMA_F: {stability_tracker.fake_acc_ema:.3f}"
                             )
                             pbar.update(1)
                             
-                            # 清理生成器训练的临时变量
+                            # 清理临时变量
                             del fake_outputs, fake_completed, fake_completed_mask, pos
-                            del loss_cn_recon, loss_cn_adv, fm_loss_g, loss_cn
+                            del loss_cn_recon, loss_cn_adv, loss_cn, loss_cd, loss_cd_real, loss_cd_fake
                             del fake_global_embedded, fake_global_mask_embedded
-                            del fake_predictions, fake_lf, fake_gf
                             del real_global_embedded, real_global_mask_embedded
-                            del real_lf_detached, real_gf_detached
+                            del fake_predictions, fake_lf, fake_gf, real_predictions, real_lf, real_gf
+                            del batch_local_targets_noisy, fake_outputs_noisy
                             del batch_data
                             
-                            # 在每个snaperiod_3步保存检查点和进行验证
+                            # ==================== 验证和保存 ====================
                             if step % snaperiod_3 == 0:
                                 try:
-                                    model_cn.eval()
-                                    model_cd.eval()
+                                    val_results = validateAll(model_cn, model_cd, val_subset_loader, device)
                                     
-                                    # 验证判别器 - 与Phase 2保持一致的验证逻辑
-                                    val_correct = 0
-                                    val_total = 0
-                                    val_loss_sum = 0.0
-                                    val_batch_count = 0
+                                    print(f"\n=== 验证结果 (Step {step}) ===")
+                                    print(f"重建损失: {val_results['recon_loss']:.4f}")
+                                    print(f"对抗损失: {val_results['adv_loss']:.4f}")
+                                    print(f"真实准确率: {val_results['real_acc']:.4f}")
+                                    print(f"假样本准确率: {val_results['fake_acc']:.4f}")
+                                    print(f"判别器平均准确率: {val_results['disc_acc']:.4f}")
+                                    print(f"稳定性EMA - 真实: {stability_tracker.real_acc_ema:.3f}, 假样本: {stability_tracker.fake_acc_ema:.3f}")
                                     
-                                    with torch.no_grad():
-                                        for val_batch in val_subset_loader:
-                                            try:
-                                                # 准备验证批次
-                                                val_data = prepare_batch_data(val_batch, device)
-                                                (
-                                                    val_local_inputs,
-                                                    val_local_masks,
-                                                    val_local_targets,
-                                                    val_global_inputs,
-                                                    val_global_masks,
-                                                    val_global_targets,
-                                                    val_metadata,
-                                                ) = val_data
-                                                
-                                                # 生成假样本
-                                                val_fake_outputs = safe_tensor_operation(
-                                                    model_cn,
-                                                    val_local_inputs,
-                                                    val_local_masks,
-                                                    val_global_inputs,
-                                                    val_global_masks,
-                                                )
-                                                
-                                                # 嵌入 - 与Phase 2保持一致
-                                                val_fake_global_embedded, val_fake_global_mask_embedded, _ = merge_local_to_global(
-                                                    val_fake_outputs,
-                                                    val_global_inputs,
-                                                    val_global_masks,
-                                                    val_metadata,
-                                                )
-                                                
-                                                val_real_global_embedded, val_real_global_mask_embedded, _ = merge_local_to_global(
-                                                    val_local_targets,
-                                                    val_global_inputs,
-                                                    val_global_masks,
-                                                    val_metadata,
-                                                )
-                                                
-                                                # 获取判别器预测 - 与Phase 2保持一致
-                                                val_fake_preds, _, _ = safe_tensor_operation(
-                                                    model_cd,
-                                                    val_fake_outputs,
-                                                    val_local_masks,
-                                                    val_fake_global_embedded,
-                                                    val_fake_global_mask_embedded,
-                                                )
-                                                
-                                                val_real_preds, _, _ = safe_tensor_operation(
-                                                    model_cd,
-                                                    val_local_targets,
-                                                    val_local_masks,
-                                                    val_real_global_embedded,
-                                                    val_real_global_mask_embedded,
-                                                )
-                                                
-                                                val_fake_preds = torch.sigmoid(val_fake_preds)
-                                                val_real_preds = torch.sigmoid(val_real_preds)
-                                                
-                                                # 计算准确率 - 与Phase 2保持一致
-                                                val_total += val_fake_preds.size(0) * 2
-                                                val_correct += (
-                                                    (val_fake_preds < 0.5).sum() + (val_real_preds >= 0.5).sum()
-                                                ).item()
-                                                
-                                                # 计算重建损失用于生成器评估
-                                                val_completed, val_completed_mask, val_pos = merge_local_to_global(
-                                                    val_fake_outputs, val_global_inputs, val_global_masks, val_metadata
-                                                )
-                                                val_recon_loss = completion_network_loss(
-                                                    val_fake_outputs, val_local_targets, val_local_masks,
-                                                    val_global_targets, val_completed, val_completed_mask, val_pos
-                                                )
-                                                val_loss_sum += val_recon_loss.item()
-                                                val_batch_count += 1
-                                                
-                                                print(f"validation: fake_preds: {(val_fake_preds<0.5).sum()}/{val_fake_preds.size(0)}, real_preds: {(val_real_preds>0.5).sum()}/{val_real_preds.size(0)}")
-                                                
-                                                # 清理验证变量
-                                                del val_fake_outputs, val_fake_global_embedded, val_fake_global_mask_embedded
-                                                del val_real_global_embedded, val_real_global_mask_embedded
-                                                del val_fake_preds, val_real_preds
-                                                del val_completed, val_completed_mask, val_pos
-                                                del val_data
-                                                
-                                            except Exception as e:
-                                                print(f"验证批次处理失败: {e}")
-                                                cleanup_memory()
-                                                continue
+                                    # 更新学习率调度器
+                                    scheduler_cn.step(val_results['recon_loss'])
+                                    scheduler_cd.step(val_results['disc_acc'])
                                     
-                                    val_accuracy = val_correct / max(val_total, 1)
-                                    val_recon_loss = val_loss_sum / max(val_batch_count, 1)
-                                    print(f"\n验证准确率: {val_accuracy:.4f}, 重建损失: {val_recon_loss:.4f}")
+                                    # 检测判别器崩溃
+                                    if stability_tracker.is_collapsed():
+                                        print("检测到判别器不稳定，调整训练参数...")
+                                        # 降低学习率
+                                        for param_group in opt_cd.param_groups:
+                                            param_group['lr'] *= 0.5
+                                            print(f"判别器学习率降低到: {param_group['lr']:.2e}")
                                     
-                                    # 检查判别器崩溃 - 简化逻辑，移除手动学习率调整
-                                    if (real_acc < 0.3 or fake_acc < 0.3) and patience_counter > 10:
-                                        print("检测到判别器可能崩溃，采取措施...")
-                                        
-                                        # 如果有良好状态的保存，则重置
-                                        if 'good_state' in locals() and good_state is not None:
-                                            print("重置判别器到之前的良好状态")
-                                            model_cd.load_state_dict(good_state)
-                                            patience_counter += 1
-                                    
-                                    # 如果判别器表现良好，保存状态
-                                    elif 0.4 < real_acc and 0.4 < fake_acc:
-                                        print("判别器表现平衡，保存良好状态")
-                                        good_state = copy.deepcopy(model_cd.state_dict())
-                                        patience_counter = 0
-                                    
-                                    # Update Visdom plot for validation loss
+                                    # 可视化验证结果
                                     if viz is not None and "phase3_val" in loss_windows:
                                         try:
                                             viz.line(
-                                                # Y=torch.tensor([[val_recon_loss, val_accuracy, real_acc, fake_acc]]),
-                                                Y=torch.tensor([[val_recon_loss, _, real_acc, fake_acc, (real_acc + fake_acc) / 2]]),
-                                                X=torch.tensor([step]),
-                                                win=loss_windows["phase3_val"],
-                                                update="append",
+                                                Y=torch.tensor([[val_results['recon_loss'], val_results['adv_loss'],
+                                                            val_results['real_acc'], val_results['fake_acc'],
+                                                            val_results['disc_acc']]]),
+                                                X=torch.tensor([step]), win=loss_windows["phase3_val"], update="append"
                                             )
                                         except:
                                             pass
                                     
                                     # 保存最佳模型
-                                    if val_recon_loss < best_val_loss_joint:
-                                        best_val_loss_joint = val_recon_loss
+                                    if val_results['recon_loss'] < best_val_loss_joint:
+                                        best_val_loss_joint = val_results['recon_loss']
                                         cn_best_path = os.path.join(result_dir, "phase_3", "model_cn_best")
                                         cd_best_path = os.path.join(result_dir, "phase_3", "model_cd_best")
                                         torch.save(model_cn.state_dict(), cn_best_path)
                                         torch.save(model_cd.state_dict(), cd_best_path)
-                                        print(f"  Saved new best model with val_recon_loss = {val_recon_loss:.4f}")
+                                        print(f"保存新的最佳模型 (重建损失: {val_results['recon_loss']:.4f})")
                                     
-                                    # Generate test completions for visualization
+                                    # 可视化测试结果
                                     with torch.no_grad():
                                         try:
                                             test_batch = next(iter(val_subset_loader))
-                                            # Prepare test batch
                                             test_data = prepare_batch_data(test_batch, device)
-                                            (
-                                                test_local_inputs,
-                                                test_local_masks,
-                                                test_local_targets,
-                                                test_global_inputs,
-                                                test_global_masks,
-                                                test_global_targets,
-                                                metadata,
-                                            ) = test_data
-                                            # Generate completions
+                                            (test_local_inputs, test_local_masks, test_local_targets,
+                                            test_global_inputs, test_global_masks, test_global_targets, metadata) = test_data
+                                            
                                             test_output = safe_tensor_operation(
-                                                model_cn,
-                                                test_local_inputs,
-                                                test_local_masks,
-                                                test_global_inputs,
-                                                test_global_masks,
+                                                model_cn, test_local_inputs, test_local_masks,
+                                                test_global_inputs, test_global_masks
                                             )
-                                            # Merge local output to global for visualization
                                             completed, completed_mask, _ = merge_local_to_global(
                                                 test_output, test_global_inputs, test_global_masks, metadata
                                             )
-                                            # Visualize results in Visdom
-                                            visualize_results(
-                                                test_local_targets,
-                                                test_local_inputs,
-                                                test_output,
-                                                completed,
-                                                step,
-                                                "phase_3",
-                                            )
                                             
-                                            # 清理测试变量
-                                            del test_output, completed, completed_mask
-                                            del test_data
+                                            visualize_results(test_local_targets, test_local_inputs,
+                                                            test_output, completed, step, "phase_3")
                                             
+                                            del test_output, completed, completed_mask, test_data
                                         except Exception as e:
-                                            print(f"生成测试完成图像时失败: {e}")
-                                            cleanup_memory()
+                                            print(f"可视化失败: {e}")
                                     
-                                    # Save both models
-                                    # 删除旧的 cn 和 cd 模型文件
+                                    # 保存定期检查点
                                     for pattern in ["model_cn_step*", "model_cd_step*"]:
                                         old_files = glob.glob(os.path.join(result_dir, "phase_3", pattern))
                                         for file in old_files:
                                             try:
                                                 os.remove(file)
-                                                print(f"删除旧文件: {os.path.basename(file)}")
-                                            except Exception as e:
-                                                print(f"删除文件失败: {e}")
+                                            except:
+                                                pass
+                                    
                                     cn_path = os.path.join(result_dir, "phase_3", f"model_cn_step{step}")
                                     cd_path = os.path.join(result_dir, "phase_3", f"model_cd_step{step}")
                                     torch.save(model_cn.state_dict(), cn_path)
                                     torch.save(model_cd.state_dict(), cd_path)
                                     
-                                    # 保存检查点
-                                    save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 3, result_dir, best_val_loss=best_val_loss_joint)
-                                    
-                                    model_cn.train()
-                                    model_cd.train()
+                                    save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 3, result_dir,
+                                                best_val_loss=best_val_loss_joint)
                                     
                                 except Exception as e:
                                     print(f"验证步骤失败: {e}")
@@ -2074,6 +1933,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                             continue
                 
                 pbar.close()
+                print(f"🎉 Phase 3 训练完成! 最佳重建损失: {best_val_loss_joint:.4f}")
                 
             except Exception as e:
                 print(f"Phase 3训练过程中发生严重错误: {e}")
