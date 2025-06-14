@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn import Parameter
+from interpolation import TorchInterpolationModule, create_interpolation_module
 
 def l2normalize(v, eps=1e-12):
     return v / (v.norm() + eps)
@@ -445,6 +446,27 @@ class CompletionNetwork(nn.Module):
     def __init__(self, input_channels=1):
         super(CompletionNetwork, self).__init__()
         self.debug = False
+        
+        # ========================================
+        # 添加插值预处理模块
+        # ========================================
+        self.enable_interpolation = False
+        self.interpolation_method = "bicubic"  # 可选: "bilinear", "bicubic", "nearest"
+        self.interpolation_prob = 1
+        if self.enable_interpolation:
+            # 为local和global输入分别创建插值模块
+            self.local_interpolator = create_interpolation_module(
+                method=self.interpolation_method,
+                enabled=True,
+                mixed_training=True,          # 训练时随机使用
+                interpolation_prob=self.interpolation_prob
+            )
+
+            print(f"插值预处理已启用: {self.interpolation_method}, 训练概率: {self.interpolation_prob}")
+        else:
+            self.local_interpolator = None
+
+            print("插值预处理已禁用")
 
         # Early attention modules for local and global inputs
         self.early_local_attention = EarlyAttentionModule(input_channels)
@@ -620,6 +642,21 @@ class CompletionNetwork(nn.Module):
     def forward(self, local_input, local_mask, global_input, global_mask):
         local_mask = local_mask.float()
         global_mask = global_mask.float()
+        
+        # ========================================
+        # 插值预处理步骤
+        # ========================================
+        if self.enable_interpolation and self.local_interpolator is not None:
+            # 对local输入进行插值预处理
+            local_input_processed = self.local_interpolator(local_input, local_mask)
+            
+            if self.debug:
+                # 输出插值效果统计
+                local_changed = (local_input != local_input_processed).sum().item()               
+                print(f"Local插值改变像素数: {local_changed}")
+        else:
+            # 不使用插值，保持原始输入
+            local_input_processed = local_input
 
         # Apply early attention
         local_input_attended = self.early_local_attention(local_input, local_mask)

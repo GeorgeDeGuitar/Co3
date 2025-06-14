@@ -206,7 +206,7 @@ def perform_dem_completion(model, input_batch, device, output_dir):
 def main():
     # Configuration
     model_path = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\phase_3\model_cn_best"  # Path to your best model weights
-    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\predict_p3"  # Directory to save results
+    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\predict_p3_2"  # Directory to save results
     
     # Test data paths
     json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"
@@ -217,7 +217,7 @@ def main():
     )  # Optional, set to None if not available
     
     # Hardware setup
-    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Load model

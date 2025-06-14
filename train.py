@@ -2,7 +2,7 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from torch.nn.utils import spectral_norm
 from torch.optim import Adadelta, Adam
 import torchvision.transforms as transforms
@@ -20,11 +20,12 @@ from models import ContextDiscriminator
 from modelcn3 import CompletionNetwork
 
 # Import your custom dataset
-from DemDataset1 import DemDataset
+## from DemDataset1 import DemDataset
+from DemDataset2 import DemDataset, fast_collate_fn
 # from DEMData import DEMData
 
 # Import the custom_collate_fn function from your dataset module
-from DemDataset import custom_collate_fn
+## from DemDataset import custom_collate_fn
 # from DEMData import custom_collate_fn
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -194,8 +195,50 @@ def prepare_batch_data(batch, device):
         cleanup_memory()
         raise
 
+def simple_dataset_split(dataset, test_ratio=0.1, val_ratio=0.2, seed=42):
+    """
+    简洁的数据集分割方法
+    
+    Args:
+        dataset: 完整数据集
+        test_ratio: 测试集比例（从前面取）
+        val_ratio: 验证集比例（从剩余数据中取）
+        seed: 随机种子，确保可重现
+        
+    Returns:
+        train_dataset, val_dataset, test_dataset
+    """
+    total_size = len(dataset)
+    test_size = int(total_size * test_ratio)
+    
+    # Step 1: 前test_ratio%作为测试集（固定不变）
+    test_indices = list(range(test_size))
+    remaining_indices = list(range(test_size, total_size))
+    
+    # Step 2: 剩余数据shuffle后分为训练集和验证集
+    np.random.seed(seed)
+    np.random.shuffle(remaining_indices)
+    
+    remaining_size = len(remaining_indices)
+    val_size = int(remaining_size * val_ratio)
+    
+    val_indices = remaining_indices[:val_size]
+    train_indices = remaining_indices[val_size:]
+    
+    # 创建子数据集
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
+    test_dataset = Subset(dataset, test_indices)
+    
+    print(f"数据集分割完成:")
+    print(f"  总数据: {total_size}")
+    print(f"  测试集: {len(test_indices)} ({len(test_indices)/total_size:.1%}) - 索引 0 到 {test_size-1}")
+    print(f"  验证集: {len(val_indices)} ({len(val_indices)/total_size:.1%})")
+    print(f"  训练集: {len(train_indices)} ({len(train_indices)/total_size:.1%})")
+    
+    return train_dataset, val_dataset, test_dataset
 
-def train(dir, envi, cuda, batch, test=False, resume_from=None):
+def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
     try:
         # =================================================
         # Configuration settings (replace with your settings)
@@ -317,9 +360,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
         except Exception as e:
             print(f"加载数据集失败: {e}")
             raise
+        
+        
 
         # Split dataset into train and validation
-        dataset_size = len(full_dataset)
+        '''dataset_size = len(full_dataset)
         val_size = int(validation_split * dataset_size)
         train_size = dataset_size - val_size
 
@@ -327,9 +372,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
             full_dataset,
             [train_size, val_size],
             generator=torch.Generator().manual_seed(42),
-        )
+        )'''
 
-        # Create data loaders with optimized settings
+        '''# Create data loaders with optimized settings
         train_loader = DataLoader(
             train_dataset, 
             batch_size=batch_size, 
@@ -353,7 +398,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
         )
         
         # 创建验证子集
-        val_indices = np.random.choice(len(val_loader.dataset), size=100, replace=False)
+        val_indices = np.random.choice(len(val_loader.dataset), size=50, replace=False)
         val_subset = torch.utils.data.Subset(val_loader.dataset, val_indices)
         val_subset_loader = DataLoader(
             val_subset, 
@@ -361,6 +406,92 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
             shuffle=True, 
             collate_fn=custom_collate_fn, 
             num_workers=2, 
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        )
+        
+        # 测试集加载器（训练时不使用，只在最终评估时用）
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=custom_collate_fn,
+            num_workers=2,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        )'''
+        # Load dataset with error handling
+        try:
+            dataset = DemDataset(
+                json_dir, array_dir, mask_dir, target_dir,
+                min_valid_pixels=20, 
+                max_valid_pixels=900,
+                enable_synthetic_masks=True,  # 启用生成式mask
+                synthetic_ratio=1.0,          # 每个原始数据生成1个合成数据
+                analyze_data=True             # 分析数据质量
+            )
+            full_dataset = dataset
+            print(f"数据集加载成功，总数据量: {len(full_dataset)}")
+            print(f"  - 原始数据: {dataset.original_length}")
+            if dataset.enable_synthetic_masks:
+                print(f"  - 生成式数据: {dataset.synthetic_length}")
+        except Exception as e:
+            print(f"加载数据集失败: {e}")
+            raise
+        
+        # ==================== 简洁的数据分割（仅需这几行）====================
+        train_dataset, val_dataset, test_dataset = simple_dataset_split(
+            full_dataset, 
+            test_ratio=0.1,    # 10% 测试集
+            val_ratio=0.1,    # 25% 验证集（从剩余90%中取）
+            seed=42            # 固定种子确保可重现
+        )
+
+        '''# Split dataset into train and validation
+        dataset_size = len(full_dataset)
+        val_size = int(validation_split * dataset_size)
+        train_size = dataset_size - val_size
+
+        train_dataset, val_dataset = random_split(
+            full_dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42),
+        )'''
+
+        # Create data loaders with optimized settings
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            num_workers=2,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            num_workers=2,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        )
+
+        # 创建验证子集
+        val_indices = np.random.choice(len(val_loader.dataset), size=100, replace=False)
+        val_subset = torch.utils.data.Subset(val_loader.dataset, val_indices)
+        val_subset_loader = DataLoader(
+            val_subset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            num_workers=2,
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
@@ -393,7 +524,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
         opt_cd = Adadelta(model_cd.parameters())
         
         # 初始化训练状态变量
-        phase = 3  # 从第二阶段开始
+        phase = Phase  # 从第二阶段开始
         step_phase1 = 0
         step_phase2 = 0
         step_phase3 = 0
@@ -423,6 +554,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                 cleanup_memory()
                 raise
         else:
+            if phase==1:
+                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results18\phase_1\model_cn_step26500"
+                if os.path.exists(pretrained_weights_path):
+                    try:
+                        model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device, weights_only=True))
+                        print(f"Phase1: Loaded pre-trained weights from {pretrained_weights_path}")
+                    except Exception as e:
+                        print(f"加载预训练权重失败: {e}")
+                
             if phase==2:
                 # Load pre-trained weights if available
                 pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\phase_1\model_cn_step150000"
@@ -842,6 +982,12 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
         # Training Phase 1: Train Completion Network only
         # =================================================
         
+        # ==================== 梯度累积配置 ====================
+        target_batch_size = 32  # 目标有效batch size
+        actual_batch_size = batch_size  # 当前的batch_size (8)
+        accumulation_steps = target_batch_size // actual_batch_size  # 4
+        print(f"配置梯度累积: {accumulation_steps} steps, 有效batch size: {target_batch_size}")
+        
         if step_phase1 < steps_1 and phase == 1:
             print("开始/继续第1阶段训练...")
             try:
@@ -849,6 +995,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                 pbar = tqdm(total=steps_1, initial=step_phase1)
                 step = step_phase1
                 scaler = GradScaler()
+                
+                # 梯度累积计数器
+                accumulated_step = 0
 
                 while step < steps_1:
                     for batch in train_loader:
@@ -891,13 +1040,21 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                                 completed,
                                 completed_mask,
                                 pos
-                            )
+                            ) / accumulation_steps
 
                             # Backward and optimize
                             scaler.scale(loss).backward()
-                            scaler.step(opt_cn)
-                            scaler.update()
-                            opt_cn.zero_grad(set_to_none=True)
+                            accumulated_step += 1
+                            
+                            if accumulated_step % accumulation_steps == 0:
+                                '''scaler.step(opt_cn)
+                                scaler.update()
+                                opt_cn.zero_grad(set_to_none=True)'''
+                                scaler.unscale_(opt_cn)
+                                torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
+                                scaler.step(opt_cn)
+                                scaler.update()
+                                opt_cn.zero_grad(set_to_none=True)
 
                             # Update Visdom plot for training loss
                             if viz is not None and "phase1_train" in loss_windows:
@@ -993,16 +1150,35 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                                             )
 
                                             # 保存模型
-                                            folder= os.path.join(result_dir, "phase_1")
-                                            old_files = glob.glob(os.path.join(folder, "model_cn_step*"))
+                                            folder = os.path.join(result_dir, "phase_1")
+                                            import re
+
+                                            # 找到所有匹配的检查点文件（不要求.pth扩展名）
+                                            pattern = os.path.join(folder, "model_cn_step*")
+                                            old_files = glob.glob(pattern)
+
+                                            # 删除step小于当前step-1000的文件
                                             for file in old_files:
                                                 try:
-                                                    os.remove(file)
-                                                    print(f"删除旧文件: {os.path.basename(file)}")
+                                                    # 从文件名中提取step数字
+                                                    basename = os.path.basename(file)
+                                                    # 修改正则表达式，使.pth扩展名可选
+                                                    match = re.search(r'model_cn_step(\d+)(?:\.pth)?$', basename)
+                                                    if match:
+                                                        file_step = int(match.group(1))
+                                                        # 只删除step小于当前step-1000的文件
+                                                        if file_step < step - 1000:
+                                                            os.remove(file)
+                                                            print(f"删除旧文件: {basename} (step={file_step})")
+                                                    else:
+                                                        print(f"无法解析文件名: {basename}")
                                                 except Exception as e:
                                                     print(f"删除文件失败: {e}")
+
+                                            # 保存当前模型
                                             model_path = os.path.join(result_dir, "phase_1", f"model_cn_step{step}")
                                             torch.save(model_cn.state_dict(), model_path)
+                                            print(f"保存模型: model_cn_step{step}")
                                             
                                             # 清理变量
                                             del test_output, completed, completed_mask
@@ -1230,13 +1406,13 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
             print("开始/继续第2阶段训练...")
             try:
                 # 使用Adam优化器
-                opt_cd = torch.optim.Adam(model_cd.parameters(), lr=2e-5, betas=(0.5, 0.999), eps=1e-8)
+                opt_cd = torch.optim.Adam(model_cd.parameters(), lr=2e-6, betas=(0.5, 0.999), eps=1e-8)
                 
                 # 创建梯度缩放器，用于自动混合精度训练
                 scaler2 = GradScaler(enabled=True)
                 
                 # 创建学习率调度器 - 只使用一种调度器
-                scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-6)
+                scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-8)
                 
                 # 实例噪声初始值和最小值
                 start_noise = 0.1
@@ -1248,6 +1424,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                 running_fake_acc = 0.0
                 patience_counter = 0
                 max_patience = 10  # 增加耐心值，避免过早降低学习率
+                
+                accumulated_step = 0
                 
                 pbar = tqdm(total=steps_2, initial=step_phase2)
                 step = step_phase2
@@ -1357,22 +1535,27 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                                     loss_real *= 0.5
                                     loss_fake *= 5.0
                                     print("loss fake weight strengthened")
-                                loss = loss_real + loss_fake + fm_loss + lsb_loss + r1_loss
+                                loss = (loss_real + loss_fake + fm_loss + lsb_loss + r1_loss)/accumulation_steps
                             
                             # 使用梯度缩放器进行反向传播
                             scaler2.scale(loss).backward()
                             
-                            # 梯度裁剪
-                            scaler2.unscale_(opt_cd)
-                            torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
+                            accumulated_step += 1
                             
-                            # 更新参数
-                            scaler2.step(opt_cd)
-                            scaler2.update()
-                            opt_cd.zero_grad(set_to_none=True)
+                            # 每accumulation_steps更新一次参数
+                            if accumulated_step % accumulation_steps == 0:
                             
-                            # 更新学习率 - 只使用调度器
-                            scheduler.step()
+                                # 梯度裁剪
+                                scaler2.unscale_(opt_cd)
+                                torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
+                                
+                                # 更新参数
+                                scaler2.step(opt_cd)
+                                scaler2.update()
+                                opt_cd.zero_grad(set_to_none=True)
+                                
+                                # 更新学习率 - 只使用调度器
+                                scheduler.step()
                             
                             # 更新运行指标
                             running_loss += loss.item()
@@ -1525,14 +1708,38 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                                     else:
                                         patience_counter += 1
                                         print(f"未见改善。耐心计数: {patience_counter}/{max_patience}")
+                                        # 如果长时间没有改善，降低学习率
+                                        if patience_counter >= max_patience:
+                                            for param_group in opt_cd.param_groups:
+                                                param_group['lr'] *= 0.5
+                                            print(f"性能停滞，将学习率降低到: {opt_cd.param_groups[0]['lr']:.6f}")
+                                            patience_counter = 0
                                     
                                     # 保存模型
+                                    
+                                    # 保存模型
+
+                                    # 找到所有匹配的检查点文件
+                                    
+                                    
+                                    # 删除step小于当前step-1000的文件
+                                        
                                     folder = os.path.join(result_dir, "phase_2")
-                                    old_files = glob.glob(os.path.join(folder, "model_cd_step*"))
+                                    pattern = os.path.join(folder, "model_cd_step*")
+                                    old_files = glob.glob(pattern)
                                     for file in old_files:
                                         try:
-                                            os.remove(file)
-                                            print(f"删除旧文件: {os.path.basename(file)}")
+                                            # 从文件名中提取step数字
+                                            basename = os.path.basename(file)
+                                            match = re.search(r'model_cd_step(\d+)(?:\.pth)?$', basename)
+                                            if match:
+                                                file_step = int(match.group(1))
+                                                # 只删除step小于当前step-1000的文件
+                                                if file_step < step - 1000:
+                                                    os.remove(file)
+                                                    print(f"删除旧文件: {basename} (step={file_step})")
+                                            else:
+                                                print(f"无法解析文件名: {basename}")
                                         except Exception as e:
                                             print(f"删除文件失败: {e}")
                                     model_path = os.path.join(result_dir, "phase_2", f"model_cd_step{step}")
@@ -1903,19 +2110,36 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None):
                                         except Exception as e:
                                             print(f"可视化失败: {e}")
                                     
-                                    # 保存定期检查点
-                                    for pattern in ["model_cn_step*", "model_cd_step*"]:
-                                        old_files = glob.glob(os.path.join(result_dir, "phase_3", pattern))
+                                    folder = os.path.join(result_dir, "phase_3")
+
+                                    # 处理两类模型文件
+                                    for model_type in ["cn", "cd"]:
+                                        pattern = os.path.join(folder, f"model_{model_type}_step*")
+                                        old_files = glob.glob(pattern)
+                                        
+                                        # 删除step小于当前step-1000的文件
                                         for file in old_files:
                                             try:
-                                                os.remove(file)
-                                            except:
-                                                pass
-                                    
+                                                # 从文件名中提取step数字
+                                                basename = os.path.basename(file)
+                                                match = re.search(rf'model_{model_type}_step(\d+)(?:\.pth)?$', basename)
+                                                if match:
+                                                    file_step = int(match.group(1))
+                                                    # 只删除step小于当前step-1000的文件
+                                                    if file_step < step - 1000:
+                                                        os.remove(file)
+                                                        print(f"删除旧文件: {basename} (step={file_step})")
+                                                else:
+                                                    print(f"无法解析文件名: {basename}")
+                                            except Exception as e:
+                                                print(f"删除文件失败: {e}")
+
+                                    # 保存当前模型
                                     cn_path = os.path.join(result_dir, "phase_3", f"model_cn_step{step}")
                                     cd_path = os.path.join(result_dir, "phase_3", f"model_cd_step{step}")
                                     torch.save(model_cn.state_dict(), cn_path)
                                     torch.save(model_cd.state_dict(), cd_path)
+                                    print(f"保存模型: model_cn_step{step} 和 model_cd_step{step}")
                                     
                                     save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 3, result_dir,
                                                 best_val_loss=best_val_loss_joint)
@@ -2045,15 +2269,16 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
     parser.add_argument("--resume", type=str, default=None, help="resume from checkpoint path")
-    parser.add_argument("--dir", type=str, default="results16_1_2", help="directory to save results")
-    parser.add_argument("--envi", type=str, default="dem16", help="visdom environment name")
-    parser.add_argument("--cuda", type=str, default="cuda:0", help="CUDA device to use")
+    parser.add_argument("--dir", type=str, default="results19", help="directory to save results")
+    parser.add_argument("--envi", type=str, default="dem19", help="visdom environment name")
+    parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
     parser.add_argument("--test", type=bool, default=False, help="whether to run in test mode")
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
+    parser.add_argument("--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)")
     args = parser.parse_args()
     
     try:
-        train(dir=args.dir, envi=args.envi, cuda=args.cuda, test=args.test, batch=args.batch, resume_from=args.resume)
+        train(dir=args.dir, envi=args.envi, cuda=args.cuda, test=args.test, batch=args.batch, resume_from=args.resume, Phase=args.phase)
     except KeyboardInterrupt:
         print("训练被用户中断")
         cleanup_memory()
