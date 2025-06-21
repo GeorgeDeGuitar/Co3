@@ -16,7 +16,7 @@ from torchvision.transforms.functional import to_pil_image
 from loss import  completion_network_loss
 import torch.nn.functional as F
 # Import your models
-from models import ContextDiscriminator
+from models0 import ContextDiscriminator
 from modelcn3 import CompletionNetwork
 
 # Import your custom dataset
@@ -767,7 +767,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 
             if phase==2:
                 # Load pre-trained weights if available
-                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_step150000"
+                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_best"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device, weights_only=True))
@@ -1479,6 +1479,122 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             
             return contrastive_loss
         
+        def enhanced_feature_contrastive_loss(
+            real_local_feat,
+            real_global_feat,
+            fake_local_feat,
+            fake_global_feat,
+            alpha=1.0,
+            beta=0.6,
+            gamma=0.6,
+        ):
+            """
+            增强版特征对比损失 - 基于你的原始设计，加入余弦分离和中心分离
+
+            Args:
+                real_local_feat: [B, D] 真实样本局部特征
+                real_global_feat: [B, D] 真实样本全局特征
+                fake_local_feat: [B, D] 生成样本局部特征
+                fake_global_feat: [B, D] 生成样本全局特征
+                alpha: 原始欧几里得距离权重
+                beta: 余弦分离权重
+                gamma: 中心分离权重
+
+            Returns:
+                total_loss: 组合损失
+                loss_info: 各项损失的详细信息
+            """
+
+            # ========== 1. 原始的欧几里得距离分离 (你的原始设计) ==========
+            # 计算真假特征均值
+            real_local_mean = real_local_feat.mean(0)
+            fake_local_mean = fake_local_feat.mean(0)
+            real_global_mean = real_global_feat.mean(0)
+            fake_global_mean = fake_global_feat.mean(0)
+
+            # 计算欧氏距离
+            local_distance = torch.sqrt(
+                torch.sum((real_local_mean - fake_local_mean) ** 2) + 1e-6
+            )
+            global_distance = torch.sqrt(
+                torch.sum((real_global_mean - fake_global_mean) ** 2) + 1e-6
+            )
+
+            # 原始对比损失 - 我们希望最大化距离（所以使用负号）
+            euclidean_loss = 1.0 / (local_distance + 1e-6) + 1.0 / (
+                global_distance + 1e-6
+            )
+
+            # ========== 2. 余弦分离损失 ==========
+            # 归一化特征到单位球面
+            real_local_norm = F.normalize(real_local_feat, p=2, dim=1)
+            real_global_norm = F.normalize(real_global_feat, p=2, dim=1)
+            fake_local_norm = F.normalize(fake_local_feat, p=2, dim=1)
+            fake_global_norm = F.normalize(fake_global_feat, p=2, dim=1)
+
+            # 计算真假样本特征的余弦相似度
+            local_cosine_sim = F.cosine_similarity(
+                real_local_norm, fake_local_norm, dim=1
+            )
+            global_cosine_sim = F.cosine_similarity(
+                real_global_norm, fake_global_norm, dim=1
+            )
+
+            # 余弦分离损失 - 希望相似度接近0（正交）
+            cosine_separation_loss = (
+                local_cosine_sim.abs().mean() + global_cosine_sim.abs().mean()
+            ) / 2.0
+
+            # ========== 3. 中心分离损失 ==========
+            # 计算归一化后的中心
+            real_local_center = real_local_norm.mean(0, keepdim=True)  # [1, D]
+            real_global_center = real_global_norm.mean(0, keepdim=True)  # [1, D]
+            fake_local_center = fake_local_norm.mean(0, keepdim=True)  # [1, D]
+            fake_global_center = fake_global_norm.mean(0, keepdim=True)  # [1, D]
+
+            # 归一化中心向量
+            real_local_center_norm = F.normalize(real_local_center, p=2, dim=1)
+            real_global_center_norm = F.normalize(real_global_center, p=2, dim=1)
+            fake_local_center_norm = F.normalize(fake_local_center, p=2, dim=1)
+            fake_global_center_norm = F.normalize(fake_global_center, p=2, dim=1)
+
+            # 计算中心间的余弦相似度
+            local_center_sim = F.cosine_similarity(
+                real_local_center_norm, fake_local_center_norm, dim=1
+            )
+            global_center_sim = F.cosine_similarity(
+                real_global_center_norm, fake_global_center_norm, dim=1
+            )
+
+            # 中心分离损失 - 希望中心相似度尽可能小
+            center_separation_loss = (
+                local_center_sim.abs() + global_center_sim.abs()
+            ) / 2.0
+
+            # ========== 4. 组合损失 ==========
+            total_loss = (
+                alpha * euclidean_loss  # 原始欧几里得距离
+                + beta * cosine_separation_loss  # 余弦分离
+                + gamma * center_separation_loss  # 中心分离
+            )
+            # print(f"euclidean_loss: {euclidean_loss.item()}, cosine_separation: {cosine_separation_loss.item()}, center_separation: {center_separation_loss.item()}")
+
+            # 返回详细信息用于调试
+            loss_info = {
+                "total_loss": total_loss.item(),
+                "euclidean_loss": euclidean_loss.item(),
+                "cosine_separation": cosine_separation_loss.item(),
+                "center_separation": center_separation_loss.item(),
+                "local_euclidean_distance": local_distance.item(),
+                "global_euclidean_distance": global_distance.item(),
+                "local_cosine_similarity": local_cosine_sim.mean().item(),
+                "global_cosine_similarity": global_cosine_sim.mean().item(),
+                "local_center_similarity": local_center_sim.item(),
+                "global_center_similarity": global_center_sim.item(),
+            }
+
+            return total_loss  # , loss_info
+        
         def gradient_penalty(discriminator, 
                         real_local_data, 
                         real_local_mask, 
@@ -1608,7 +1724,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             print("开始/继续第2阶段训练...")
             try:
                 # 使用Adam优化器
-                opt_cd_p2 = torch.optim.Adam(model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8)
+                opt_cd_p2 = torch.optim.Adam(model_cd.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8)
                 if cd_lr is not None:
                     opt_cd_p2.param_groups[0]['lr'] = cd_lr  # 设置初始学习率
                 
@@ -1715,7 +1831,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 
                                 # 计算特征匹配损失
                                 fm_weight = 10
-                                fm_loss = feature_contrastive_loss(
+                                '''fm_loss = feature_contrastive_loss(
+                                    real_lf, real_gf, fake_lf, fake_gf) * fm_weight'''
+                                fm_loss = enhanced_feature_contrastive_loss(
                                     real_lf, real_gf, fake_lf, fake_gf) * fm_weight
                                 lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
                                 r1_loss = r1_regularization(
@@ -1739,11 +1857,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 if real_acc < 0.15 and fake_acc > 0.85:
                                     loss_real *= 5.0
                                     loss_fake *= 0.5
-                                    print("loss real weight strengthened")
+                                    print("\nloss real weight strengthened")
                                 elif fake_acc < 0.15 and real_acc > 0.85:
                                     loss_real *= 0.5
                                     loss_fake *= 5.0
-                                    print("loss fake weight strengthened")
+                                    print("\nloss fake weight strengthened")
                                 loss = (loss_real + loss_fake + fm_loss + lsb_loss + r1_loss)/accumulation_steps
                             
                             # 使用梯度缩放器进行反向传播
@@ -1791,7 +1909,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             
                             # 更新进度条
                             current_lr = scheduler.get_last_lr()[0]
-                            pbar.set_description(f"Phase 2 | loss: {loss.item():.4f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, lr: {current_lr:.1e}")
+                            pbar.set_description(
+                                f"Phase 2 | loss: {loss.item():.4f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, lr: {current_lr:.1e}, "
+                                f"real_lf: {real_lf.mean().item():.4f}, real_gf: {real_gf.mean().item():.4f}, "
+                                f"fake_lf: {fake_lf.mean().item():.4f}, fake_gf: {fake_gf.mean().item():.4f}"
+                            )
                             pbar.update(1)
                             
                             # Visdom可视化

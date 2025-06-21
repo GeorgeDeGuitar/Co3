@@ -4,10 +4,12 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 from modelcn3 import CompletionNetwork
-from DemDataset import custom_collate_fn  # Import your custom collate function
+from DemDataset2 import DemDataset, fast_collate_fn # Import your custom collate function
 import torchvision.transforms as transforms
 from tqdm import tqdm
 import time
+from train import simple_dataset_split  # Import your dataset splitting function
+from torch.utils.data import DataLoader
 
 def load_model(model_path, device):
     """
@@ -205,8 +207,8 @@ def perform_dem_completion(model, input_batch, device, output_dir):
 
 def main():
     # Configuration
-    model_path = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\phase_3\model_cn_best"  # Path to your best model weights
-    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\predict_p3_2"  # Directory to save results
+    model_path = r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_step150000"  # Path to your best model weights
+    result_dir = r"E:\KingCrimson Dataset\Simulate\data0\results19\predict_p1_150k"  # Directory to save results
     
     # Test data paths
     json_dir = r"E:\KingCrimson Dataset\Simulate\data0\testjson"
@@ -223,19 +225,44 @@ def main():
     # Load model
     print("Loading model...")
     model = load_model(model_path, device)
-    
-    # Load test dataset
-    from DemDataset import DemDataset  # Import your dataset class
-    
+        
     print("Loading test data...")
-    test_dataset = DemDataset(json_dir, array_dir, mask_dir, target_dir)
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset, 
-        batch_size=4,  # Use smaller batch size for inference
-        shuffle=True,
-        collate_fn=custom_collate_fn,
-        num_workers=4
+    try:
+        dataset = DemDataset(
+            json_dir, array_dir, mask_dir, target_dir,
+            min_valid_pixels=20, 
+            max_valid_pixels=900,
+            enable_synthetic_masks=True,  # 启用生成式mask
+            synthetic_ratio=1.0,          # 每个原始数据生成1个合成数据
+            analyze_data=False             # 分析数据质量
+        )
+        full_dataset = dataset
+        print(f"数据集加载成功，总数据量: {len(full_dataset)}")
+        print(f"  - 原始数据: {dataset.original_length}")
+        if dataset.enable_synthetic_masks:
+            print(f"  - 生成式数据: {dataset.synthetic_length}")
+    except Exception as e:
+        print(f"加载数据集失败: {e}")
+        raise
+
+    # ==================== 简洁的数据分割（仅需这几行）====================
+    train_dataset, val_dataset, test_dataset = simple_dataset_split(
+        full_dataset, 
+        test_ratio=0.1,    # 10% 测试集
+        val_ratio=0.1,    # 25% 验证集（从剩余90%中取）
+        seed=42            # 固定种子确保可重现
     )
+    # test_dataset = DemDataset(json_dir, array_dir, mask_dir, target_dir)
+    test_loader = DataLoader(
+            test_dataset,
+            batch_size=4,
+            shuffle=True,
+            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            num_workers=2,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        )
     
     # Run inference
     print("Running inference...")
