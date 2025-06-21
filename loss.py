@@ -493,7 +493,7 @@ class EnhancedGradientConsistencyLoss(nn.Module):
         target_mag, target_dir = self.compute_gradient_magnitude_direction(target)
         
         # 计算过渡掩码（边界权重）- 使用平滑函数替代手动CPU计算
-        boundary_weight = self.smooth_mask_generate(mask)
+        boundary_weight = smooth_mask_generate(mask)
         
         # 计算梯度幅值差异损失
         magnitude_loss = F.l1_loss(output_mag * boundary_weight, 
@@ -516,7 +516,7 @@ class EnhancedGradientConsistencyLoss(nn.Module):
         # 加权组合
         return magnitude_loss + direction_loss
         
-    def smooth_mask_generate(self, mask, sigma=1.0, edge_width=10, edge_weight=1.0, visualize=False):
+    '''def smooth_mask_generate(self, mask, sigma=1.0, edge_width=10, edge_weight=1.0, visualize=False):
         """
         生成平滑的过渡权重掩码，特别关注图像边缘区域和掩码交界处
         
@@ -617,7 +617,7 @@ class EnhancedGradientConsistencyLoss(nn.Module):
                 plt.show()
         
         return final_weights
-
+'''
 def total_variation_loss(pred, mask=None, dilation_kernel_size=3, visualize=False):
     """
     计算总变差损失，鼓励图像整体平滑。
@@ -861,12 +861,35 @@ def mean_shift_loss(pred, mask):
     loss = torch.abs(known_mean - unknown_mean)
     return loss
 
+def input_smoothness_loss(output, mask, sigma=0.5):
+    """
+    只关注生成输出自身在边界区域的平滑性
+    """
+    # 生成边界mask
+    boundary_mask = smooth_mask_generate(mask, sigma=sigma)
+    
+    # 方法1：二阶导数（拉普拉斯算子）- 检测突变
+    laplacian_kernel = torch.tensor([[0, 1, 0], 
+                                   [1, -4, 1], 
+                                   [0, 1, 0]], 
+                                  dtype=output.dtype, device=output.device)
+    laplacian_kernel = laplacian_kernel.view(1, 1, 3, 3)
+    
+    # 计算拉普拉斯（二阶导数）
+    laplacian = F.conv2d(output, laplacian_kernel, padding=1)
+    
+    # 只在边界区域惩罚高曲率（突变）
+    smoothness_loss = (laplacian ** 2) * boundary_mask
+    smoothness_loss = smoothness_loss.sum() / (boundary_mask.sum() + 1e-8)
+    
+    return smoothness_loss
+
 def completion_network_loss(
     output, local_target, mask, global_target, completed, completed_mask, pos
 ):
     """Calculate the completion network loss."""
     nw = 0.2# 0.3
-    bw = 0# 0.5 #completed，大部分在无法改变的global
+    bw = 0.4# 0.5 #completed，大部分在无法改变的global
     ew = 0# 0.2
     cw = 1
     cg=0
@@ -886,7 +909,7 @@ def completion_network_loss(
     )  # target 是目标补全图像'''
     # smooth_loss = masked_tv_loss(completed, completed_mask) * 100
     # 边界连续性损失（掩码边界过渡）
-    # boundary_loss = boundary_continuity_loss(output, local_target, mask, sigma=5.0)
+    boundary_loss = boundary_continuity_loss(output, local_target, mask, sigma=0.5)*5  # 边界连续性损失，强调补全区域与非补全区域的平滑过渡
     # 各阶梯度损失
     # edge_loss = edge_continuity_loss(completed, global_target, pos, 2, completed_mask)*10
     # 空间一致性损失
@@ -904,12 +927,13 @@ def completion_network_loss(
     fa_boundary_loss = ElevationBoundaryContinuityLoss().to(output.device)
     all_fa_loss = fa_boundary_loss(output, local_target, mask)
     fa_loss = all_fa_loss['total']*1e-4
+    insm_loss = input_smoothness_loss(output, mask, sigma=0.5) * 0.02 # 输入平滑性损失，鼓励生成输出在边界区域的平滑性
     # gradient_similarity = gradient_similarity_loss(output,local_target)*1000 # 梯度相似性损失，梯度方向的一致性
     # ssim = ssim_loss(output,local_target)*10
     # print(f"Consistency_loss: {consistency_loss}, SSIM loss: {ssim}, Gradient similarity loss: {gradient_similarity}, Variation loss: {variation_loss}, Mean shift loss: {mean_shift}")
-    '''print(
-        f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Variation loss: {variation_loss*vw}"
-    )'''
+    print(
+        f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Boundary loss: {insm_loss*bw}"
+    )
     # return (null_loss * nw + bw * boundary_loss + edge_loss * ew + consistency_loss * cw + gradient_loss * cg + variation_loss*vw + gradient_similarity*gsw)/totalw
-    return (null_loss * nw + consistency_loss * cw + fa_loss * faw) / totalw
+    return (null_loss * nw + consistency_loss * cw + fa_loss * faw + insm_loss * bw) / totalw
 

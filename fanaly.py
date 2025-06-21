@@ -24,10 +24,11 @@ class ElevationBoundaryContinuityLoss(nn.Module):
         self.register_buffer('laplacian', torch.tensor([[0, -1, 0], [-1, 4, -1], [0, -1, 0]], 
                                                       dtype=torch.float32).view(1, 1, 3, 3))
     
-    def extract_boundary_mask(self, mask, width=2):
-        """提取边界mask - 多层边界"""
+    def extract_boundary_mask(self, mask, width=2, visualize=False):
+        """提取边界mask - 多层边界，可选可视化"""
         boundary_masks = {}
-        
+        import matplotlib.pyplot as plt
+
         for w in range(1, width + 1):
             kernel_size = w * 2 + 1
             kernel = torch.ones(1, 1, kernel_size, kernel_size, device=mask.device)
@@ -36,7 +37,14 @@ class ElevationBoundaryContinuityLoss(nn.Module):
             eroded = F.conv2d(mask.float(), kernel, padding=w) >= kernel.numel()
             boundary = (dilated.float() - eroded.float()).clamp(0, 1)
             boundary_masks[f'width_{w}'] = boundary
-            
+
+            if visualize:
+                plt.figure()
+                plt.imshow(boundary.squeeze().cpu().numpy(), cmap='hot')
+                plt.title(f'Boundary Mask (width={w})')
+                plt.axis('off')
+                plt.show()
+                
         return boundary_masks
     
     def compute_elevation_gradients(self, elevation):

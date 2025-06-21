@@ -36,6 +36,65 @@ import copy
 import glob
 import psutil
 import traceback
+import tempfile
+import shutil
+import glob
+import os
+import torch
+import re
+import subprocess
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def visdom_server():
+    """上下文管理器，自动管理Visdom服务器的启动和关闭"""
+    process = None
+    # try:
+        # 启动服务器
+    process = subprocess.Popen(['python', '-m', 'visdom.server'],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+    print("正在启动Visdom服务器...")
+    time.sleep(3)  # 等待服务器启动
+    yield process
+    '''finally:
+        # 确保服务器被关闭
+        if process:
+            process.terminate()
+            process.wait()
+            print("Visdom服务器已关闭")'''
+
+# 稳定性追踪器
+class StabilityTracker:
+    def __init__(self):
+        self.real_acc_ema = 0.5
+        self.fake_acc_ema = 0.5
+        self.recon_loss_ema = float('inf')
+        self.alpha = 0.95
+        self.collapse_threshold = 0.15
+        self.recovery_steps = 0
+        
+    def update(self, real_acc, fake_acc, recon_loss):
+        self.real_acc_ema = self.alpha * self.real_acc_ema + (1 - self.alpha) * real_acc
+        self.fake_acc_ema = self.alpha * self.fake_acc_ema + (1 - self.alpha) * fake_acc
+        self.recon_loss_ema = self.alpha * self.recon_loss_ema + (1 - self.alpha) * recon_loss
+        
+    def is_collapsed(self):
+        return (self.real_acc_ema < self.collapse_threshold or 
+            self.fake_acc_ema < self.collapse_threshold)
+            
+    def get_loss_weights(self):
+        if self.real_acc_ema < 0.25 and self.fake_acc_ema > 0.75 or self.fake_acc_ema - self.real_acc_ema >= 0.4:
+            print("strenthening real sample weights")
+            return 3.0, 0.3  # 加强真实样本权重
+        elif self.fake_acc_ema < 0.25 and self.real_acc_ema > 0.75 or self.real_acc_ema - self.fake_acc_ema >= 0.4:
+            print("strenthening fake sample weights")
+            return 0.3, 3.0  # 加强假样本权重
+        else:
+            return 1.0, 1.0
+
+
 
 # 内存管理工具函数
 def cleanup_memory():
@@ -78,11 +137,18 @@ def safe_tensor_operation(func, *args, **kwargs):
                 raise
 
 # setx PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:98
-def save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, phase, result_dir, best_val_loss=None, best_acc=None):
+
+
+def save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, phase, result_dir, best_val_loss=None, best_acc=None, cn_lr=None, cd_lr=None,):
     """
-    保存训练检查点，包括模型权重、优化器状态和训练进度
+    安全保存训练检查点，包括模型权重、优化器状态和训练进度
     """
     try:
+        # 检查磁盘空间
+        free_space = shutil.disk_usage(result_dir).free
+        if free_space < 1024 * 1024 * 1024:  # 少于1GB
+            print(f"警告：磁盘空间不足 ({free_space / 1024**3:.2f} GB)")
+        
         checkpoint = {
             'model_cn_state_dict': model_cn.state_dict(),
             'model_cd_state_dict': model_cd.state_dict() if model_cd is not None else None,
@@ -91,59 +157,167 @@ def save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, phase, result_dir,
             'step': step,
             'phase': phase,
             'best_val_loss': best_val_loss,
-            'best_acc': best_acc
+            'best_acc': best_acc,
+            'cn_lr': cn_lr,
+            'cd_lr': cd_lr
         }
         
-        # 删除旧的模型文件
-        old_files = glob.glob(os.path.join(result_dir, f"checkpoint_phase{phase}_step*"))
-        for file in old_files:
-            try:
-                os.remove(file)
-                print(f"删除旧文件: {os.path.basename(file)}")
-            except Exception as e:
-                print(f"删除文件失败: {e}")
+        # 确保结果目录存在
+        os.makedirs(result_dir, exist_ok=True)
         
-        checkpoint_path = os.path.join(result_dir, f"checkpoint_phase{phase}_step{step}.pth")
-        torch.save(checkpoint, checkpoint_path)
-        print(f"保存检查点到 {checkpoint_path}")
+        checkpoint_filename = f"checkpoint_phase{phase}_step{step}.pth"
+        checkpoint_path = os.path.join(result_dir, checkpoint_filename)
         
-        # 保存一个最新的检查点文件，方便恢复
-        latest_checkpoint_path = os.path.join(result_dir, f"latest_checkpoint.pth")
-        torch.save(checkpoint, latest_checkpoint_path)
-        print(f"保存最新检查点到 {latest_checkpoint_path}")
+        # 使用临时文件安全保存
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pth.tmp', dir=result_dir) as tmp_file:
+            temp_path = tmp_file.name
+            
+        try:
+            # 保存到临时文件
+            print(f"正在保存检查点到临时文件: {temp_path}")
+            torch.save(checkpoint, temp_path)
+            
+            # 验证临时文件完整性
+            print("验证检查点文件完整性...")
+            test_checkpoint = torch.load(temp_path, map_location='cpu', weights_only=False)
+            required_keys = ['model_cn_state_dict', 'step', 'phase']
+            for key in required_keys:
+                if key not in test_checkpoint:
+                    raise ValueError(f"检查点验证失败：缺少键 {key}")
+            del test_checkpoint  # 释放内存
+            
+            # 如果验证通过，移动临时文件到最终位置
+            if os.path.exists(checkpoint_path):
+                # 备份现有文件
+                backup_path = checkpoint_path + ".backup"
+                shutil.move(checkpoint_path, backup_path)
+                print(f"备份现有检查点到: {backup_path}")
+            
+            shutil.move(temp_path, checkpoint_path)
+            print(f"成功保存检查点到: {checkpoint_path}")
+            
+            # 保存最新检查点的副本
+            latest_checkpoint_path = os.path.join(result_dir, "latest_checkpoint.pth")
+            shutil.copy2(checkpoint_path, latest_checkpoint_path)
+            print(f"保存最新检查点到: {latest_checkpoint_path}")
+            
+            # 现在安全地删除旧文件（保留最近的3个）
+            cleanup_old_checkpoints(result_dir, phase, step, keep_count=3)
+            
+        except Exception as e:
+            # 如果保存失败，清理临时文件
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise e
         
         # 清理checkpoint变量
         del checkpoint
         cleanup_memory()
         
         return checkpoint_path
+        
     except Exception as e:
         print(f"保存检查点时发生错误: {e}")
         cleanup_memory()
         raise
 
+def cleanup_old_checkpoints(result_dir, current_phase, current_step, keep_count=3):
+    """
+    清理旧的检查点文件，保留最近的几个
+    """
+    try:
+        # 找到同一阶段的所有检查点文件
+        pattern = os.path.join(result_dir, f"checkpoint_phase{current_phase}_step*.pth")
+        checkpoint_files = glob.glob(pattern)
+        
+        # 排除当前步数的文件
+        current_filename = f"checkpoint_phase{current_phase}_step{current_step}.pth"
+        checkpoint_files = [f for f in checkpoint_files if not f.endswith(current_filename)]
+        
+        # 按步数排序（从文件名提取步数）
+        def extract_step(filepath):
+            try:
+                filename = os.path.basename(filepath)
+                # 提取step数字
+                step_part = filename.split('_step')[1].split('.pth')[0]
+                return int(step_part)
+            except:
+                return 0
+        
+        checkpoint_files.sort(key=extract_step, reverse=True)
+        
+        # 删除多余的文件
+        files_to_delete = checkpoint_files[keep_count:]
+        for file_path in files_to_delete:
+            try:
+                os.remove(file_path)
+                print(f"删除旧检查点: {os.path.basename(file_path)}")
+            except Exception as e:
+                print(f"删除文件失败 {file_path}: {e}")
+                
+        # 同时清理备份文件
+        backup_files = glob.glob(os.path.join(result_dir, "*.backup"))
+        backup_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        for backup_file in backup_files[keep_count:]:
+            try:
+                os.remove(backup_file)
+                print(f"删除旧备份: {os.path.basename(backup_file)}")
+            except Exception as e:
+                print(f"删除备份文件失败 {backup_file}: {e}")
+                
+    except Exception as e:
+        print(f"清理旧检查点时出错: {e}")
+
 def load_checkpoint(checkpoint_path, model_cn, model_cd, opt_cn, opt_cd, device):
     """
-    加载训练检查点，恢复模型权重、优化器状态和训练进度
+    安全加载训练检查点，带有错误恢复机制
     """
     try:
         print(f"从 {checkpoint_path} 加载检查点")
+        
+        # 检查文件是否存在且不为空
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"检查点文件不存在: {checkpoint_path}")
+        
+        file_size = os.path.getsize(checkpoint_path)
+        if file_size == 0:
+            raise ValueError(f"检查点文件为空: {checkpoint_path}")
+        
+        print(f"检查点文件大小: {file_size / 1024**2:.2f} MB")
+        
+        # 尝试加载检查点
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
+        # 验证检查点完整性
+        required_keys = ['model_cn_state_dict', 'step', 'phase']
+        for key in required_keys:
+            if key not in checkpoint:
+                raise KeyError(f"检查点缺少必要的键: {key}")
+        
+        # 加载模型状态
+        print("加载生成器状态...")
         model_cn.load_state_dict(checkpoint['model_cn_state_dict'])
         
-        if model_cd is not None and checkpoint['model_cd_state_dict'] is not None:
+        if model_cd is not None and checkpoint.get('model_cd_state_dict') is not None:
+            print("加载判别器状态...")
             model_cd.load_state_dict(checkpoint['model_cd_state_dict'])
         
-        opt_cn.load_state_dict(checkpoint['opt_cn_state_dict'])
+        # 加载优化器状态
+        if 'opt_cn_state_dict' in checkpoint and checkpoint['opt_cn_state_dict'] is not None:
+            print("加载生成器优化器状态...")
+            opt_cn.load_state_dict(checkpoint['opt_cn_state_dict'])
         
-        if opt_cd is not None and checkpoint['opt_cd_state_dict'] is not None:
+        if (opt_cd is not None and 
+            checkpoint.get('opt_cd_state_dict') is not None):
+            print("加载判别器优化器状态...")
             opt_cd.load_state_dict(checkpoint['opt_cd_state_dict'])
         
         step = checkpoint['step']
         phase = checkpoint['phase']
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         best_acc = checkpoint.get('best_acc', float('-inf'))
+        cn_lr = checkpoint.get('cn_lr', None)
+        cd_lr = checkpoint.get('cd_lr', None)
         
         print(f"成功加载检查点：阶段 {phase}，步骤 {step}")
         
@@ -151,9 +325,30 @@ def load_checkpoint(checkpoint_path, model_cn, model_cd, opt_cn, opt_cd, device)
         del checkpoint
         cleanup_memory()
         
-        return step, phase, best_val_loss, best_acc
+        return step, phase, best_val_loss, best_acc, cn_lr, cd_lr
+        
     except Exception as e:
-        print(f"加载检查点时发生错误: {e}")
+        print(f"加载检查点失败: {e}")
+        
+        # 尝试加载备份文件
+        backup_path = checkpoint_path + ".backup"
+        if os.path.exists(backup_path):
+            print(f"尝试加载备份文件: {backup_path}")
+            try:
+                return load_checkpoint(backup_path, model_cn, model_cd, opt_cn, opt_cd, device)
+            except Exception as backup_e:
+                print(f"备份文件也损坏: {backup_e}")
+        
+        # 尝试加载latest_checkpoint.pth
+        result_dir = os.path.dirname(checkpoint_path)
+        latest_path = os.path.join(result_dir, "latest_checkpoint.pth")
+        if os.path.exists(latest_path) and latest_path != checkpoint_path:
+            print(f"尝试加载最新检查点: {latest_path}")
+            try:
+                return load_checkpoint(latest_path, model_cn, model_cd, opt_cn, opt_cd, device)
+            except Exception as latest_e:
+                print(f"最新检查点也损坏: {latest_e}")
+        
         cleanup_memory()
         raise
 
@@ -256,7 +451,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
         # Training parameters
         steps_1 = 150000  # Phase 1 training steps
-        steps_2 = 50000   # Phase 2 training steps
+        steps_2 = 100000   # Phase 2 training steps
         steps_3 = 200000  # Phase 3 training steps
 
         snaperiod_1 = 500   # How often to save snapshots in phase 1
@@ -430,7 +625,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 max_valid_pixels=900,
                 enable_synthetic_masks=True,  # 启用生成式mask
                 synthetic_ratio=1.0,          # 每个原始数据生成1个合成数据
-                analyze_data=True             # 分析数据质量
+                analyze_data=False             # 分析数据质量
             )
             full_dataset = dataset
             print(f"数据集加载成功，总数据量: {len(full_dataset)}")
@@ -520,9 +715,12 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             raise
 
         # Setup optimizers
-        opt_cn = Adadelta(model_cn.parameters())
-        opt_cd = Adadelta(model_cd.parameters())
-        
+        opt_cn_p1 = Adadelta(model_cn.parameters())
+        # opt_cd_p1 = Adadelta(model_cd.parameters())
+        opt_cd_p2 = torch.optim.Adam(model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8)
+        opt_cn_p3 = torch.optim.Adam(model_cn.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8)
+        opt_cd_p3 = torch.optim.Adam(model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8)
+                
         # 初始化训练状态变量
         phase = Phase  # 从第二阶段开始
         step_phase1 = 0
@@ -531,20 +729,24 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         best_val_loss = float('inf')
         best_acc = float('-inf')
         best_val_loss_joint = float('inf')
+        cn_lr = None
+        cd_lr = None
         
         # 如果指定了检查点文件，则加载它恢复训练
         if resume_from:
             try:
-                step, phase, best_val_loss, best_acc = load_checkpoint(resume_from, model_cn, model_cd, opt_cn, opt_cd, device)
-                
+                step, phase, best_val_loss, best_acc, cn_lr, cd_lr = load_checkpoint(resume_from, model_cn, model_cd, opt_cn_p1, opt_cd_p2, device)
                 if phase == 1:
+                    step, phase, best_val_loss, best_acc, cn_lr, cd_lr = load_checkpoint(resume_from, model_cn, model_cd, opt_cn_p1, opt_cd_p2, device)
                     step_phase1 = step
                     best_val_loss = best_val_loss
                 elif phase == 2:
+                    step, phase, best_val_loss, best_acc, cn_lr, cd_lr = load_checkpoint(resume_from, model_cn, model_cd, opt_cn_p1, opt_cd_p2, device)
                     step_phase1 = steps_1
                     step_phase2 = step
                     best_acc = best_acc
                 elif phase == 3:
+                    step, phase, best_val_loss, best_acc, cn_lr, cd_lr = load_checkpoint(resume_from, model_cn, model_cd, opt_cn_p3, opt_cd_p3, device)
                     step_phase1 = steps_1
                     step_phase2 = steps_2
                     step_phase3 = step
@@ -555,17 +757,17 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 raise
         else:
             if phase==1:
-                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results18\phase_1\model_cn_step26500"
+                '''pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results18\phase_1\model_cn_step26500"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device, weights_only=True))
                         print(f"Phase1: Loaded pre-trained weights from {pretrained_weights_path}")
                     except Exception as e:
-                        print(f"加载预训练权重失败: {e}")
+                        print(f"加载预训练权重失败: {e}")'''
                 
             if phase==2:
                 # Load pre-trained weights if available
-                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\phase_1\model_cn_step150000"
+                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_step150000"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device, weights_only=True))
@@ -574,7 +776,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         print(f"加载预训练权重失败: {e}")
             elif phase==3:
                 # Load pre-trained weights if available
-                pretrained_weights_path_cn= r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\phase_1\model_cn_step150000"
+                pretrained_weights_path_cn= r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_step150000"
                 if os.path.exists(pretrained_weights_path_cn):
                     try:
                         model_cn.load_state_dict(torch.load(pretrained_weights_path_cn, map_location=device, weights_only=True))
@@ -582,7 +784,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CN预训练权重失败: {e}")
                         
-                pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results16_1_2\phase_2\model_cd_step33000"
+                pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results17\phase_2\model_cd_best"
                 if os.path.exists(pretrained_weights_path_cd):
                     try:
                         model_cd.load_state_dict(torch.load(pretrained_weights_path_cd, map_location=device, weights_only=True))
@@ -601,7 +803,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             completed=None,
             step=0,
             phase="phase_1",
-            num_test_completions=4,
+            num_test_completions=8,
         ):
             """
             在Visdom中可视化输入、目标、输出和完成的图像，使用高程图着色方案。
@@ -983,7 +1185,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         # =================================================
         
         # ==================== 梯度累积配置 ====================
-        target_batch_size = 32  # 目标有效batch size
+        target_batch_size = 16  # 目标有效batch size
         actual_batch_size = batch_size  # 当前的batch_size (8)
         accumulation_steps = target_batch_size // actual_batch_size  # 4
         print(f"配置梯度累积: {accumulation_steps} steps, 有效batch size: {target_batch_size}")
@@ -995,6 +1197,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 pbar = tqdm(total=steps_1, initial=step_phase1)
                 step = step_phase1
                 scaler = GradScaler()
+                opt_cn_p1 = Adadelta(model_cn.parameters())
                 
                 # 梯度累积计数器
                 accumulated_step = 0
@@ -1004,7 +1207,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         try:
                             # 定期检查内存
                             if step % 100 == 0:
-                                check_memory_and_cleanup(threshold_gb=8.0)
+                                check_memory_and_cleanup(threshold_gb=6.0)
                             
                             # Prepare batch data
                             batch_data = prepare_batch_data(batch, device)
@@ -1050,11 +1253,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 '''scaler.step(opt_cn)
                                 scaler.update()
                                 opt_cn.zero_grad(set_to_none=True)'''
-                                scaler.unscale_(opt_cn)
+                                scaler.unscale_(opt_cn_p1)
                                 torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
-                                scaler.step(opt_cn)
+                                scaler.step(opt_cn_p1)
                                 scaler.update()
-                                opt_cn.zero_grad(set_to_none=True)
+                                opt_cn_p1.zero_grad(set_to_none=True)
 
                             # Update Visdom plot for training loss
                             if viz is not None and "phase1_train" in loss_windows:
@@ -1070,7 +1273,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                             # 在每个snaperiod_1步保存检查点
                             if step % snaperiod_1 == 0:
-                                save_checkpoint(model_cn, None, opt_cn, opt_cd, step, 1, result_dir, best_val_loss=best_val_loss)
+                                save_checkpoint(model_cn, None, opt_cn_p1, opt_cd_p2, step, 1, result_dir, best_val_loss=best_val_loss)
 
                             step += 1
                             pbar.set_description(f"Phase 1 | train loss: {loss.item():.5f}")
@@ -1151,7 +1354,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                                             # 保存模型
                                             folder = os.path.join(result_dir, "phase_1")
-                                            import re
 
                                             # 找到所有匹配的检查点文件（不要求.pth扩展名）
                                             pattern = os.path.join(folder, "model_cn_step*")
@@ -1406,13 +1608,17 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             print("开始/继续第2阶段训练...")
             try:
                 # 使用Adam优化器
-                opt_cd = torch.optim.Adam(model_cd.parameters(), lr=2e-6, betas=(0.5, 0.999), eps=1e-8)
+                opt_cd_p2 = torch.optim.Adam(model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8)
+                if cd_lr is not None:
+                    opt_cd_p2.param_groups[0]['lr'] = cd_lr  # 设置初始学习率
                 
                 # 创建梯度缩放器，用于自动混合精度训练
                 scaler2 = GradScaler(enabled=True)
                 
                 # 创建学习率调度器 - 只使用一种调度器
-                scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-8)
+                scheduler = CosineAnnealingLR(opt_cd_p2, T_max=steps_2, eta_min=1e-8)
+                
+                stability_tracker_cd = StabilityTracker()
                 
                 # 实例噪声初始值和最小值
                 start_noise = 0.1
@@ -1423,7 +1629,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 running_real_acc = 0.0
                 running_fake_acc = 0.0
                 patience_counter = 0
-                max_patience = 10  # 增加耐心值，避免过早降低学习率
+                max_patience = 5  # 增加耐心值，避免过早降低学习率
                 
                 accumulated_step = 0
                 
@@ -1433,7 +1639,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     for batch in train_loader:
                         try:
                             # 定期检查内存
-                            if step % 50 == 0:
+                            if step % 10 == 0:
                                 check_memory_and_cleanup(threshold_gb=8.0)
                             
                             # 准备批次数据
@@ -1480,7 +1686,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 # 创建平滑标签
                                 batch_size = batch_local_targets.size(0)
                                 real_labels = torch.ones(batch_size, 1).to(device) * 0.95   # 标签平滑
-                                fake_labels = torch.zeros(batch_size, 1).to(device) + 0.05   # 标签平滑
+                                fake_labels = torch.zeros(batch_size, 1).to(device) * 0.05   # 标签平滑
                                 
                                 # 训练判别器处理假样本
                                 fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
@@ -1500,12 +1706,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     real_global_mask_embedded,
                                 )
                                 
+                                # 获取动态权重
+                                
+                                real_weight, fake_weight = stability_tracker_cd.get_loss_weights()
                                 # 使用BCEWithLogitsLoss代替BCE或自定义损失
-                                loss_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)
-                                loss_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)
+                                loss_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)*real_weight
+                                loss_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)*fake_weight
                                 
                                 # 计算特征匹配损失
-                                fm_weight = 4
+                                fm_weight = 10
                                 fm_loss = feature_contrastive_loss(
                                     real_lf, real_gf, fake_lf, fake_gf) * fm_weight
                                 lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
@@ -1527,11 +1736,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     avg_acc = (real_acc + fake_acc) / 2
 
                                 # 动态调整损失权重，平衡训练
-                                if real_acc < 0.1 and fake_acc > 0.9:
+                                if real_acc < 0.15 and fake_acc > 0.85:
                                     loss_real *= 5.0
                                     loss_fake *= 0.5
                                     print("loss real weight strengthened")
-                                elif fake_acc < 0.1 and real_acc > 0.9:
+                                elif fake_acc < 0.15 and real_acc > 0.85:
                                     loss_real *= 0.5
                                     loss_fake *= 5.0
                                     print("loss fake weight strengthened")
@@ -1546,16 +1755,17 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             if accumulated_step % accumulation_steps == 0:
                             
                                 # 梯度裁剪
-                                scaler2.unscale_(opt_cd)
+                                scaler2.unscale_(opt_cd_p2)
                                 torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
                                 
                                 # 更新参数
-                                scaler2.step(opt_cd)
+                                scaler2.step(opt_cd_p2)
                                 scaler2.update()
-                                opt_cd.zero_grad(set_to_none=True)
+                                opt_cd_p2.zero_grad(set_to_none=True)
                                 
                                 # 更新学习率 - 只使用调度器
                                 scheduler.step()
+                                stability_tracker_cd.update(real_acc, fake_acc, 0)
                             
                             # 更新运行指标
                             running_loss += loss.item()
@@ -1706,13 +1916,20 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         print(f"发现新的最佳模型，准确率: {val_accuracy:.4f}")
                                         patience_counter = 0
                                     else:
+                                        '''# 检测判别器崩溃
+                                        if stability_tracker_cd.is_collapsed():
+                                            print("检测到判别器不稳定，调整训练参数...")
+                                            # 降低学习率
+                                            for param_group in opt_cd.param_groups:
+                                                param_group['lr'] *= 0.5
+                                                print(f"判别器学习率降低到: {param_group['lr']:.6f}")'''
                                         patience_counter += 1
                                         print(f"未见改善。耐心计数: {patience_counter}/{max_patience}")
                                         # 如果长时间没有改善，降低学习率
                                         if patience_counter >= max_patience:
-                                            for param_group in opt_cd.param_groups:
+                                            for param_group in opt_cd_p2.param_groups:
                                                 param_group['lr'] *= 0.5
-                                            print(f"性能停滞，将学习率降低到: {opt_cd.param_groups[0]['lr']:.6f}")
+                                            print(f"性能停滞，将学习率降低到: {opt_cd_p2.param_groups[0]['lr']:.6f}")
                                             patience_counter = 0
                                     
                                     # 保存模型
@@ -1749,7 +1966,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     model_cd.train()
                                     
                                     # 保存检查点
-                                    save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 2, result_dir, best_acc=best_acc)
+                                    save_checkpoint(model_cn, model_cd, opt_cn_p1, opt_cd_p2, step, 2, result_dir, best_acc=best_acc, cd_lr = opt_cd_p2.param_groups[0]['lr'])
                                     
                                 except Exception as e:
                                     print(f"验证步骤失败: {e}")
@@ -1792,8 +2009,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 print(f"使用梯度累积: {accumulation_steps} steps, 有效batch size: {target_batch_size}")
                 
                 # 重新初始化优化器 - 使用更保守的学习率
-                opt_cn = torch.optim.Adam(model_cn.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8)
-                opt_cd = torch.optim.Adam(model_cd.parameters(), lr=5e-6, betas=(0.5, 0.999), eps=1e-8)
+                
+                if cn_lr is not None:
+                    opt_cn_p3.param_groups[0]['lr'] = cn_lr  # 设置初始学习率
+                if cd_lr is not None:
+                    opt_cd_p3.param_groups[0]['lr'] = cd_lr  # 设置初始学习率
                 
                 # 创建梯度缩放器
                 scaler_cn = GradScaler(enabled=True, init_scale=2**10, growth_interval=2000)
@@ -1801,44 +2021,18 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 
                 # 学习率调度器
                 scheduler_cn = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    opt_cn, mode='min', factor=0.7, patience=8, min_lr=1e-6
+                    opt_cn_p3, mode='min', factor=0.7, patience=8, min_lr=1e-6
                 )
                 scheduler_cd = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    opt_cd, mode='max', factor=0.7, patience=5, min_lr=1e-7
+                    opt_cd_p3, mode='max', factor=0.7, patience=5, min_lr=1e-7
                 )
-                
-                # 稳定性追踪器
-                class StabilityTracker:
-                    def __init__(self):
-                        self.real_acc_ema = 0.5
-                        self.fake_acc_ema = 0.5
-                        self.recon_loss_ema = float('inf')
-                        self.alpha = 0.95
-                        self.collapse_threshold = 0.15
-                        self.recovery_steps = 0
-                        
-                    def update(self, real_acc, fake_acc, recon_loss):
-                        self.real_acc_ema = self.alpha * self.real_acc_ema + (1 - self.alpha) * real_acc
-                        self.fake_acc_ema = self.alpha * self.fake_acc_ema + (1 - self.alpha) * fake_acc
-                        self.recon_loss_ema = self.alpha * self.recon_loss_ema + (1 - self.alpha) * recon_loss
-                        
-                    def is_collapsed(self):
-                        return (self.real_acc_ema < self.collapse_threshold or 
-                            self.fake_acc_ema < self.collapse_threshold)
-                            
-                    def get_loss_weights(self):
-                        if self.real_acc_ema < 0.25 and self.fake_acc_ema > 0.75:
-                            return 3.0, 0.3  # 加强真实样本权重
-                        elif self.fake_acc_ema < 0.25 and self.real_acc_ema > 0.75:
-                            return 0.3, 3.0  # 加强假样本权重
-                        else:
-                            return 1.0, 1.0
-                
                 stability_tracker = StabilityTracker()
+                
+                
                 
                 # 损失权重
                 alpha_d = 1.0
-                alpha_g = 0.08  # 降低对抗损失权重
+                alpha_g = 0.1  # 降低对抗损失权重
                 fm_weight = 2.0  # 降低特征匹配权重
                 
                 # 噪声设置
@@ -1914,6 +2108,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     fake_acc = (fake_probs < 0.5).float().mean().item()
                                 
                                 # 获取动态权重
+                                
                                 real_weight, fake_weight = stability_tracker.get_loss_weights()
                                 
                                 # 计算损失
@@ -1981,18 +2176,18 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # 每accumulation_steps或到达epoch末尾时更新参数
                             if accumulated_step % accumulation_steps == 0 or accumulated_step == len(train_loader):
                                 # 更新判别器
-                                scaler_cd.unscale_(opt_cd)
+                                scaler_cd.unscale_(opt_cd_p3)
                                 torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=0.5)
-                                scaler_cd.step(opt_cd)
+                                scaler_cd.step(opt_cd_p3)
                                 scaler_cd.update()
-                                opt_cd.zero_grad(set_to_none=True)
+                                opt_cd_p3.zero_grad(set_to_none=True)
                                 
                                 # 更新生成器
-                                scaler_cn.unscale_(opt_cn)
+                                scaler_cn.unscale_(opt_cn_p3)
                                 torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
-                                scaler_cn.step(opt_cn)
+                                scaler_cn.step(opt_cn_p3)
                                 scaler_cn.update()
-                                opt_cn.zero_grad(set_to_none=True)
+                                opt_cn_p3.zero_grad(set_to_none=True)
                                 
                                 # 更新稳定性追踪器
                                 avg_recon = running_metrics['recon_loss'] / running_metrics['count']
@@ -2062,7 +2257,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     if stability_tracker.is_collapsed():
                                         print("检测到判别器不稳定，调整训练参数...")
                                         # 降低学习率
-                                        for param_group in opt_cd.param_groups:
+                                        for param_group in opt_cd_p3.param_groups:
                                             param_group['lr'] *= 0.5
                                             print(f"判别器学习率降低到: {param_group['lr']:.2e}")
                                     
@@ -2141,8 +2336,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     torch.save(model_cd.state_dict(), cd_path)
                                     print(f"保存模型: model_cn_step{step} 和 model_cd_step{step}")
                                     
-                                    save_checkpoint(model_cn, model_cd, opt_cn, opt_cd, step, 3, result_dir,
-                                                best_val_loss=best_val_loss_joint)
+                                    save_checkpoint(model_cn, model_cd, opt_cn_p3, opt_cd_p3, step, 3, result_dir,
+                                                best_val_loss=best_val_loss_joint, cn_lr=opt_cn_p3.param_groups[0]['lr'], cd_lr=opt_cd_p3.param_groups[0]['lr'])
                                     
                                 except Exception as e:
                                     print(f"验证步骤失败: {e}")
@@ -2268,16 +2463,22 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=None, help="resume from checkpoint path")
-    parser.add_argument("--dir", type=str, default="results19", help="directory to save results")
-    parser.add_argument("--envi", type=str, default="dem19", help="visdom environment name")
+    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\latest_checkpoint.pth", help="resume from checkpoint path")
+    parser.add_argument("--dir", type=str, default="results19p2", help="directory to save results")
+    parser.add_argument("--envi", type=str, default="DEMp2i19", help="visdom environment name")
     parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
     parser.add_argument("--test", type=bool, default=False, help="whether to run in test mode")
-    parser.add_argument("--batch", type=int, default=8, help="batch size for training")
+    parser.add_argument("--batch", type=int, default=4, help="batch size for training")
     parser.add_argument("--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)")
     args = parser.parse_args()
-    
-    try:
+    with visdom_server():
+        viz = visdom.Visdom()    
+        if viz.check_connection():
+            print("成功连接到Visdom服务器")
+            # 进行你的可视化操作
+        else:
+            print("连接失败")
+    try:  
         train(dir=args.dir, envi=args.envi, cuda=args.cuda, test=args.test, batch=args.batch, resume_from=args.resume, Phase=args.phase)
     except KeyboardInterrupt:
         print("训练被用户中断")

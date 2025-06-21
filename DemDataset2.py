@@ -82,7 +82,7 @@ class DemDataset(Dataset):
 
     def generate_clustered_mask(self, shape=(33, 33), 
                               missing_ratio_range=(0.3, 0.7),
-                              num_clusters_range=(1, 2),
+                              num_clusters_range=(1, 4),
                               cluster_size_range=(8, 18),
                               scattered_probability=0.2):  # 非常低的分散概率
         """
@@ -194,7 +194,7 @@ class DemDataset(Dataset):
     def _generate_concentrated_cluster(self, shape, center_x, center_y, max_radius, target_pixels):
         """生成集中的不规则形状缺失簇"""
         # 方法1: 椭圆形缺失区域 (50%概率)
-        if np.random.random() < 0.5:
+        if np.random.random() < 0.3:
             cluster_mask = self._generate_ellipse_cluster(
                 shape, center_x, center_y, max_radius, target_pixels
             )
@@ -930,10 +930,10 @@ class DemDataset(Dataset):
             # 生成主要集中分布的mask（分散概率极低：5%）
             synthetic_mask = self.generate_clustered_mask(
                 shape=(self.kernel_size, self.kernel_size),
-                missing_ratio_range=(0.25, 0.75),  # 25%-75%的缺失比例
-                num_clusters_range=(1, 2),         # 1-2个缺失簇
-                cluster_size_range=(6, 15),        # 簇大小范围
-                scattered_probability=0.05         # 仅5%概率生成分散mask
+                missing_ratio_range=(0.25, 0.75),  # 20%-80%的缺失比例
+                num_clusters_range=(1, 4),         # 1-2个缺失簇
+                cluster_size_range=(6, 18),        # 簇大小范围
+                scattered_probability=0.2         # 仅5%概率生成分散mask
             )
             
             # 将mask应用到目标数据上生成新的输入
