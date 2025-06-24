@@ -2020,7 +2020,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 # 创建平滑标签
                                 batch_size = batch_local_targets.size(0)
                                 real_labels = torch.ones(batch_size, 1).to(device) * 0.95   # 标签平滑
-                                fake_labels = torch.zeros(batch_size, 1).to(device) * 0.05   # 标签平滑
+                                fake_labels = torch.zeros(batch_size, 1).to(device) + 0.05   # 标签平滑
                                 
                                 # 训练判别器处理假样本
                                 fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
