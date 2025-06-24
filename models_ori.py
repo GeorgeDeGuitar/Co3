@@ -7,8 +7,6 @@ import shutil
 import os
 import webbrowser
 from loss import smooth_mask_generate
-import matplotlib.pyplot as plt
-from torch.nn import Parameter
 
 class EarlyAttentionModule(nn.Module):
     """适用于输入层的注意力模块"""
@@ -89,7 +87,7 @@ class BoundaryAwareModule(nn.Module):
         
         return boundary
     
-'''class GatedConv2d(nn.Module):
+class GatedConv2d(nn.Module):
     """
     带门控机制的卷积层，可以更好地处理有掩码的输入
     """
@@ -112,191 +110,7 @@ class BoundaryAwareModule(nn.Module):
             gates = gates * mask
             
         # 应用门控机制
-        return features * gates'''
-def l2normalize(v, eps=1e-12):
-    return v / (v.norm() + eps)
-
-class SpectralNorm(nn.Module):
-    def __init__(self, module, name="weight", power_iterations=1):
-        super(SpectralNorm, self).__init__()
-        self.module = module
-        self.name = name
-        self.power_iterations = power_iterations
-        if not self._made_params():
-            self._make_params()
-
-    def _update_u_v(self):
-        u = getattr(self.module, self.name + "_u")
-        v = getattr(self.module, self.name + "_v")
-        w = getattr(self.module, self.name + "_bar")
-
-        height = w.data.shape[0]
-        for _ in range(self.power_iterations):
-            v.data = l2normalize(torch.mv(torch.t(w.view(height, -1).data), u.data))
-            u.data = l2normalize(torch.mv(w.view(height, -1).data, v.data))
-
-        sigma = u.dot(w.view(height, -1).mv(v))
-        setattr(self.module, self.name, w / sigma.expand_as(w))
-
-    def _made_params(self):
-        try:
-            u = getattr(self.module, self.name + "_u")
-            v = getattr(self.module, self.name + "_v")
-            w = getattr(self.module, self.name + "_bar")
-            return True
-        except AttributeError:
-            return False
-
-    def _make_params(self):
-        w = getattr(self.module, self.name)
-
-        height = w.data.shape[0]
-        width = w.view(height, -1).data.shape[1]
-
-        u = Parameter(w.data.new(height).normal_(0, 1), requires_grad=False)
-        v = Parameter(w.data.new(width).normal_(0, 1), requires_grad=False)
-        u.data = l2normalize(u.data)
-        v.data = l2normalize(v.data)
-        w_bar = Parameter(w.data)
-
-        del self.module._parameters[self.name]
-
-        self.module.register_parameter(self.name + "_u", u)
-        self.module.register_parameter(self.name + "_v", v)
-        self.module.register_parameter(self.name + "_bar", w_bar)
-
-    def forward(self, *args):
-        self._update_u_v()
-        return self.module.forward(*args)
-
-
-class LayerNorm(nn.Module):
-    def __init__(self, num_features, eps=1e-8, affine=True):
-        super(LayerNorm, self).__init__()
-        self.num_features = num_features
-        self.affine = affine
-        self.eps = eps
-
-        if self.affine:
-            self.gamma = Parameter(torch.Tensor(num_features).uniform_())
-            self.beta = Parameter(torch.zeros(num_features))
-
-    def forward(self, x):
-        shape = [-1] + [1] * (x.dim() - 1)
-        if x.size(0) == 1:
-            mean = x.view(-1).mean().view(*shape)
-            std = x.view(-1).std().view(*shape)
-        else:
-            mean = x.view(x.size(0), -1).mean(1).view(*shape)
-            std = x.view(x.size(0), -1).std(1).view(*shape)
-        x = (x - mean) / (std + self.eps)
-        if self.affine:
-            shape = [1, -1] + [1] * (x.dim() - 2)
-            x = x * self.gamma.view(*shape) + self.beta.view(*shape)
-        return x
-class GatedConv2d(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride=1,
-        padding=0,
-        dilation=1,
-        pad_type="reflect",
-        activation="lrelu",
-        norm="none",
-        sn=False,
-    ):
-        super(GatedConv2d, self).__init__()
-        if pad_type == "reflect":
-            self.pad = nn.ReflectionPad2d(padding)
-        elif pad_type == "replicate":
-            self.pad = nn.ReplicationPad2d(padding)
-        elif pad_type == "zero":
-            self.pad = nn.ZeroPad2d(padding)
-        else:
-            raise ValueError(f"Unsupported padding type: {pad_type}")
-
-        if norm == "bn":
-            self.norm = nn.BatchNorm2d(out_channels)
-        elif norm == "in":
-            self.norm = nn.InstanceNorm2d(out_channels)
-        elif norm == "ln":
-            self.norm = LayerNorm(out_channels)
-        elif norm == "none":
-            self.norm = None
-        else:
-            raise ValueError(f"Unsupported normalization: {norm}")
-
-        if activation == "relu":
-            self.activation = nn.ReLU(inplace=True)
-        elif activation == "lrelu":
-            self.activation = nn.LeakyReLU(0.2, inplace=True)
-        elif activation == "prelu":
-            self.activation = nn.PReLU()
-        elif activation == "selu":
-            self.activation = nn.SELU(inplace=True)
-        elif activation == "tanh":
-            self.activation = nn.Tanh()
-        elif activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-        elif activation == "none":
-            self.activation = None
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
-
-        if sn:
-            self.conv2d = SpectralNorm(
-                nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    kernel_size,
-                    stride,
-                    padding=0,
-                    dilation=dilation,
-                )
-            )
-            self.mask_conv2d = SpectralNorm(
-                nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    kernel_size,
-                    stride,
-                    padding=0,
-                    dilation=dilation,
-                )
-            )
-        else:
-            self.conv2d = nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size,
-                stride,
-                padding=0,
-                dilation=dilation,
-            )
-            self.mask_conv2d = nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size,
-                stride,
-                padding=0,
-                dilation=dilation,
-            )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        x = self.pad(x)
-        conv = self.conv2d(x)
-        mask_conv = self.mask_conv2d(x)
-        gated_mask = self.sigmoid(mask_conv)
-        x = conv * gated_mask
-        if self.norm:
-            x = self.norm(x)
-        if self.activation:
-            x = self.activation(x)
-        return x
+        return features * gates
 
 
 class CompletionNetwork(nn.Module):
@@ -597,9 +411,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import spectral_norm
-# from loss import smooth_mask_generate
 
-'''class EnhancedTerrainFeatureExtractor(nn.Module):
+class EnhancedTerrainFeatureExtractor(nn.Module):
     """简化版地形特征提取器：仅包含坡度和原始高程"""
     def __init__(self, in_channels):
         super(EnhancedTerrainFeatureExtractor, self).__init__()
@@ -622,7 +435,7 @@ from torch.nn.utils import spectral_norm
             self.sobel_x.weight.data = sobel_x
             self.sobel_y.weight.data = sobel_y
         
-    def forward(self, x, mask, ismask=False):
+    def forward(self, x):
         # 检查输入是否包含NaN
         if torch.isnan(x).any():
             print("警告: TerrainFeatureExtractor输入包含NaN!")
@@ -639,162 +452,11 @@ from torch.nn.utils import spectral_norm
         # 限制值范围，防止极值
         slope = torch.clamp(slope, min=0.0, max=10.0)
         
-        if ismask:
-            # 边缘mask
-            edge_mask = smooth_mask_generate_torch(mask, 0.5, False)
-            edge_mask = (edge_mask > 0.05).float()
-            features = torch.cat([x, slope, edge_mask], dim=1)
-        else:
-            features = torch.cat([x, slope], dim=1)
-
         # 返回简化的地形特征：原始高程 + 坡度
-        
+        features = torch.cat([x, slope], dim=1)
         features = F.dropout(features, p=0.1, training=self.training)
         
-        return features'''
-'''class EnhancedTerrainFeatureExtractor(nn.Module):
-    def __init__(self, in_channels):
-        super(EnhancedTerrainFeatureExtractor, self).__init__()
-        
-        # Sobel算子
-        self.sobel_x = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
-        self.sobel_y = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
-        
-        # 关键：确保输出通道数固定
-        self.output_channels = in_channels * 2  # 原始 + 坡度
-        
-        # 特征融合层 - 将任意输入通道数映射到固定输出
-        self.feature_adapter = nn.Sequential(
-            nn.Conv2d(in_channels * 2, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, self.output_channels, kernel_size=1)
-        )
-        
-        self._init_sobel_filters(in_channels)
-        
-    def _init_sobel_filters(self, in_channels):
-        with torch.no_grad():
-            sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
-            sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
-            
-            sobel_x = sobel_x.reshape(1, 1, 3, 3).repeat(in_channels, 1, 1, 1)
-            sobel_y = sobel_y.reshape(1, 1, 3, 3).repeat(in_channels, 1, 1, 1)
-            
-            self.sobel_x.weight.data = sobel_x
-            self.sobel_y.weight.data = sobel_y
-        
-    def forward(self, x, mask, ismask=False):
-        if torch.isnan(x).any():
-            x = torch.nan_to_num(x, nan=0.0)
-            
-        # 计算坡度
-        grad_x = self.sobel_x(x)
-        grad_y = self.sobel_y(x)
-        slope = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-6)
-        slope = torch.clamp(slope, min=0.0, max=10.0)
-        
-        # 基础特征：原始 + 坡度
-        adapted_features = torch.cat([x, slope], dim=1)
-        
-        # 适配到固定维度
-        # adapted_features = self.feature_adapter(base_features)
-        
-        if ismask:
-            # 边缘mask作为额外通道
-            edge_mask = smooth_mask_generate_torch(mask, 1.0, False)
-            edge_mask = (edge_mask > 0.05).float()
-            
-            # 关键：通过注意力机制融合，而不是简单拼接
-            mask_attention = torch.sigmoid(edge_mask)
-            enhanced_features = adapted_features * (1 + mask_attention)
-            
-            return enhanced_features
-        else:
-            return adapted_features'''
-class EnhancedTerrainFeatureExtractor(nn.Module):
-    def __init__(self, in_channels):
-        super(EnhancedTerrainFeatureExtractor, self).__init__()
-        
-        # 坡度提取（使用Sobel算子）
-        self.sobel_x = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
-        self.sobel_y = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
-        
-        # 多尺度特征提取
-        self.multi_scale_conv = nn.ModuleList([
-            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
-            nn.Conv2d(in_channels, 16, kernel_size=5, padding=2),
-            nn.Conv2d(in_channels, 16, kernel_size=7, padding=3),
-        ])
-        
-        # 特征融合
-        self.feature_fusion = nn.Sequential(
-            nn.Conv2d(in_channels * 2 + 48, 64, kernel_size=3, padding=1),  # 原始+坡度+多尺度
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, in_channels * 2, kernel_size=1)  # 输出：原始+增强坡度
-        )
-        
-        self.feature_fusion2 = nn.Sequential(
-            GatedConv2d(
-                in_channels * 2 + 48,
-                64,
-                kernel_size=3,
-                stride=1,
-                padding=1,
-                activation="lrelu",
-                norm="bn",
-                sn=True,
-            ),  # 原始+坡度+多尺度
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, in_channels * 2, kernel_size=1),  # 输出：原始+增强坡度
-        )
-        
-        # 初始化Sobel滤波器
-        self._init_sobel_filters(in_channels)
-        
-    def _init_sobel_filters(self, in_channels):
-        with torch.no_grad():
-            sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
-            sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
-            
-            # 创建分组卷积核
-            sobel_x = sobel_x.reshape(1, 1, 3, 3).repeat(in_channels, 1, 1, 1)
-            sobel_y = sobel_y.reshape(1, 1, 3, 3).repeat(in_channels, 1, 1, 1)
-            
-            self.sobel_x.weight.data = sobel_x
-            self.sobel_y.weight.data = sobel_y
-        
-    def forward(self, x, mask, ismask=False):
-        if torch.isnan(x).any():
-            x = torch.nan_to_num(x, nan=0.0)
-            
-        # 计算基础坡度
-        grad_x = self.sobel_x(x)
-        grad_y = self.sobel_y(x)
-        slope = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-6)
-        slope = torch.clamp(slope, min=0.0, max=10.0)
-        
-        # 多尺度特征提取
-        multi_scale_features = []
-        for conv in self.multi_scale_conv:
-            multi_scale_features.append(conv(x))
-        multi_scale = torch.cat(multi_scale_features, dim=1)
-        
-        # 组合所有特征
-        combined = torch.cat([x, slope, multi_scale], dim=1)
-        enhanced_features = self.feature_fusion2(combined)
-        
-        if ismask:
-            # 边缘mask - 修复的版本
-            edge_mask = smooth_mask_generate_torch(mask, 1.0, False)
-            edge_mask = (edge_mask > 0.05).float()
-            features = torch.cat([enhanced_features, edge_mask], dim=1)
-        else:
-            features = enhanced_features
-            
-        return F.dropout(features, p=0.1, training=self.training)
+        return features
 
 
 class StabilizedSelfAttention(nn.Module):
@@ -872,75 +534,6 @@ class DisGatedConv2d(nn.Module):
         # 应用门控机制
         return features * gates
 
-def smooth_mask_generate_torch(mask, sigma=1.0, visualize=False):
-    """
-    修复参数错误的版本
-    """
-    mask = mask.float()
-    
-    if sigma <= 0:
-        return mask
-    
-    # 记录原始的有效区域
-    valid_region = (mask > 0).float()
-    
-    # 创建高斯核
-    kernel_size = int(2 * sigma * 3) + 1
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    
-    coords = torch.arange(kernel_size, dtype=mask.dtype, device=mask.device)
-    coords = coords - kernel_size // 2
-    gaussian_1d = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-    gaussian_1d = gaussian_1d / gaussian_1d.sum()
-    gaussian_2d = gaussian_1d.unsqueeze(0) * gaussian_1d.unsqueeze(1)
-    
-    # 处理每个通道
-    batch_size, channels = mask.shape[:2]
-    smoothed_channels = []
-    
-    for c in range(channels):
-        channel = mask[:, c:c+1, :, :]
-        valid_channel = valid_region[:, c:c+1, :, :]
-        
-        # 手动添加反射填充
-        pad_size = kernel_size // 2
-        padded_channel = F.pad(channel, (pad_size, pad_size, pad_size, pad_size), mode='reflect')
-        
-        kernel = gaussian_2d.unsqueeze(0).unsqueeze(0)
-        
-        # 使用标准conv2d（不指定padding_mode）
-        smoothed = F.conv2d(padded_channel, kernel, padding=0)  # padding=0因为已经手动填充
-        
-        # 关键：只在原始有效区域内保留平滑结果
-        # smoothed = smoothed * valid_channel
-        
-        smoothed_channels.append(smoothed)
-    
-    smoothed_mask = torch.cat(smoothed_channels, dim=1)
-    smoothed_mask = smoothed_mask.clamp(0, 1)
-    
-    # 计算边界权重
-    boundary_distance = torch.abs(smoothed_mask - 0.5)
-    boundary_weights = 1.0 - (boundary_distance / 0.5)
-    boundary_mask = boundary_weights.clamp(0, 1)
-    
-    if visualize:
-        with torch.no_grad():
-            mask_np = mask.detach().cpu().numpy()
-            boundary_np = boundary_mask.detach().cpu().numpy()
-            
-            for b in range(min(mask_np.shape[0], 2)):
-                plt.figure(figsize=(10, 5))
-                plt.subplot(1, 2, 1)
-                plt.title("Original Mask")
-                plt.imshow(mask_np[b, 0], cmap="gray")
-                plt.subplot(1, 2, 2)
-                plt.title("Smoothed Mask")
-                plt.imshow(boundary_np[b, 0], cmap="gray")
-                plt.show()
-    
-    return boundary_mask
 
 class GlobalDiscriminator(nn.Module):
     """简化的全局判别器，减少层数以减轻过拟合"""
@@ -963,9 +556,7 @@ class GlobalDiscriminator(nn.Module):
         )
         
         # 第一层卷积 - 使用门控卷积处理掩码
-        self.conv1 = DisGatedConv2d(
-            enhanced_channels, 64, kernel_size=4, stride=2, padding=1
-        )
+        self.conv1 = DisGatedConv2d(enhanced_channels, 64, kernel_size=4, stride=2, padding=1)
         self.bn1 = nn.BatchNorm2d(64)
         self.act1 = nn.LeakyReLU(0.2, inplace=True)
 
@@ -975,20 +566,20 @@ class GlobalDiscriminator(nn.Module):
         self.act2 = nn.LeakyReLU(0.2, inplace=True)
 
         # 第三层卷积
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)
+        self.conv3 = DisGatedConv2d(128, 256, kernel_size=4, stride=2, padding=1)
         self.bn3 = nn.BatchNorm2d(256)
         self.act3 = nn.LeakyReLU(0.2, inplace=True)
-
+        
         # 添加自注意力机制
         self.self_attention = StabilizedSelfAttention(256)
 
         # 第四层卷积
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1)
+        self.conv4 = DisGatedConv2d(256, 512, kernel_size=4, stride=2, padding=1)
         self.bn4 = nn.BatchNorm2d(512)
         self.act4 = nn.LeakyReLU(0.2, inplace=True)
 
         # 第五层卷积 - 保留一个额外层以处理大的输入尺寸
-        self.conv5 = nn.Conv2d(512, 512, kernel_size=4, stride=2, padding=1)
+        self.conv5 = DisGatedConv2d(512, 512, kernel_size=4, stride=2, padding=1)
         self.bn5 = nn.BatchNorm2d(512)
         self.act5 = nn.LeakyReLU(0.2, inplace=True)
         
@@ -1020,7 +611,7 @@ class GlobalDiscriminator(nn.Module):
         mask = mask.float()
         
         # 提取地形特征
-        terrain_features = self.terrain_extractor(globalin, mask)
+        terrain_features = self.terrain_extractor(globalin)
         
         # 拼接特征和掩码
         x = torch.cat([terrain_features, mask], dim=1)
@@ -1047,28 +638,25 @@ class GlobalDiscriminator(nn.Module):
         current_mask = F.interpolate(current_mask, scale_factor=0.5, mode='nearest')
         
         # 第三层卷积
-        # x = self.conv3(x, current_mask)
-        x = self.conv3(x)
+        x = self.conv3(x, current_mask)
         x = self.bn3(x)
         x = self.act3(x)
-
+        
         # 应用自注意力
         x = self.self_attention(x)
-
+        
         # 更新掩码尺寸
-        # current_mask = F.interpolate(current_mask, scale_factor=0.5, mode="nearest")
-
+        current_mask = F.interpolate(current_mask, scale_factor=0.5, mode='nearest')
+        
         # 第四层卷积
-        # x = self.conv4(x, current_mask)
-        x = self.conv4(x)
+        x = self.conv4(x, current_mask)
         x = self.bn4(x)
         x = self.act4(x)
         # 更新掩码尺寸
-        # current_mask = F.interpolate(current_mask, scale_factor=0.5, mode="nearest")
-
+        current_mask = F.interpolate(current_mask, scale_factor=0.5, mode='nearest')
+        
         # 第五层卷积
-        # x = self.conv5(x, current_mask)
-        x = self.conv5(x)
+        x = self.conv5(x, current_mask)
         x = self.bn5(x)
         x = self.act5(x)
 
@@ -1106,36 +694,28 @@ class LocalDiscriminator(nn.Module):
         
         # 使用简化版地形特征提取器
         self.terrain_extractor = EnhancedTerrainFeatureExtractor(input_channels)
-        # 计算输出通道数：原始 + 坡度 + 掩码
-        terrain_channels = input_channels * 3
+        # 计算输出通道数：原始 + 坡度
+        terrain_channels = input_channels * 2
         
         # 第一层卷积 - 使用谱归一化
-        self.conv1 = GatedConv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1,
-                        pad_type='reflect', activation='lrelu', norm='bn')
-        '''self.conv1 = spectral_norm(nn.Conv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1))
+        self.conv1 = spectral_norm(nn.Conv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1))
         self.bn1 = nn.BatchNorm2d(64)
-        self.act1 = nn.LeakyReLU(0.2, inplace=True)'''
+        self.act1 = nn.LeakyReLU(0.2, inplace=True)
 
         # 第二层卷积
-        self.conv2 = GatedConv2d(64, 128, kernel_size=4, stride=2, padding=1,
-                        pad_type='reflect', activation='lrelu', norm='bn')
-        '''self.conv2 = spectral_norm(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1))
+        self.conv2 = spectral_norm(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1))
         self.bn2 = nn.BatchNorm2d(128)
-        self.act2 = nn.LeakyReLU(0.2, inplace=True)'''
+        self.act2 = nn.LeakyReLU(0.2, inplace=True)
         
         # 第三层卷积
-        self.conv3 = GatedConv2d(128, 256, kernel_size=4, stride=2, padding=1,
-                        pad_type='reflect', activation='lrelu', norm='bn')
-        '''self.conv3 = spectral_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1))
+        self.conv3 = spectral_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1))
         self.bn3 = nn.BatchNorm2d(256)
-        self.act3 = nn.LeakyReLU(0.2, inplace=True)'''
+        self.act3 = nn.LeakyReLU(0.2, inplace=True)
 
         # 第四层卷积 - 最后一层卷积
-        self.conv4 = GatedConv2d(256, 512, kernel_size=4, stride=2, padding=1,
-                        pad_type='reflect', activation='lrelu', norm='bn')
-        '''self.conv4 = spectral_norm(nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1))
+        self.conv4 = spectral_norm(nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1))
         self.bn4 = nn.BatchNorm2d(512)
-        self.act4 = nn.LeakyReLU(0.2, inplace=True)'''
+        self.act4 = nn.LeakyReLU(0.2, inplace=True)
         
         # 全连接层
         self.flatten = nn.Flatten()
@@ -1162,23 +742,19 @@ class LocalDiscriminator(nn.Module):
             local = torch.nan_to_num(local, nan=0.0)
             
         # 提取地形特征
-        x = self.terrain_extractor(local, mask, True)
+        x = self.terrain_extractor(local)
         
         # 第一层卷积
-        # x = self.act1(self.bn1(self.conv1(x)))
-        x = self.conv1(x)
+        x = self.act1(self.bn1(self.conv1(x)))
         
         # 第二层卷积
-        # x = self.act2(self.bn2(self.conv2(x)))
-        x = self.conv2(x)
+        x = self.act2(self.bn2(self.conv2(x)))
         
         # 第三层卷积
-        # x = self.act3(self.bn3(self.conv3(x)))
-        x = self.conv3(x)
-
+        x = self.act3(self.bn3(self.conv3(x)))
+        
         # 第四层卷积
-        # x = self.act4(self.bn4(self.conv4(x)))
-        x = self.conv4(x)
+        x = self.act4(self.bn4(self.conv4(x)))
 
         # 特征展平
         x = self.flatten(x)
@@ -1204,62 +780,6 @@ class LocalDiscriminator(nn.Module):
             x = torch.nan_to_num(x, nan=0.0)
 
         return x
-'''class LocalDiscriminator(nn.Module):
-    def __init__(self, input_channels=1, input_size=33):
-        super(LocalDiscriminator, self).__init__()
-        
-        self.terrain_extractor = EnhancedTerrainFeatureExtractor(input_channels)
-        # 现在terrain_extractor总是输出 input_channels * 2
-        terrain_channels = input_channels * 2
-        
-        # 卷积层
-        self.conv_blocks = nn.Sequential(
-            # Block 1
-            spectral_norm(nn.Conv2d(terrain_channels, 64, 4, 2, 1)),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Block 2
-            spectral_norm(nn.Conv2d(64, 128, 4, 2, 1)),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Block 3
-            spectral_norm(nn.Conv2d(128, 256, 4, 2, 1)),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Block 4
-            spectral_norm(nn.Conv2d(256, 512, 4, 2, 1)),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-        
-        # 自适应池化确保固定大小
-        self.adaptive_pool = nn.AdaptiveAvgPool2d(1)
-        
-        # 确保输出1024维
-        self.feature_extractor = nn.Sequential(
-            spectral_norm(nn.Linear(512, 1024)),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5)
-        )
-        
-    def forward(self, local, mask):
-        # 提取地形特征
-        x = self.terrain_extractor(local, mask, ismask=True)
-        
-        # 卷积特征提取
-        x = self.conv_blocks(x)
-        
-        # 自适应池化
-        x = self.adaptive_pool(x)
-        x = x.view(x.size(0), -1)  # [B, 512]
-        
-        # 输出1024维特征
-        features = self.feature_extractor(x)  # [B, 1024]
-        
-        return features'''
 
 class ContextDiscriminator(nn.Module):
     """简化版上下文判别器，移除了权重共享，增加正则化"""
@@ -1330,11 +850,9 @@ class ContextDiscriminator(nn.Module):
         # 为了与原代码兼容，返回logits和特征
         return logits, x_ld, x_gd
     
-
-    
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test = 1
+    test = 2
     # Remove the "logs" folder if it exists
     logs_path = "logsgd"
     if os.path.exists(logs_path):

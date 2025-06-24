@@ -833,7 +833,74 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
             features = enhanced_features
 
         return F.dropout(features, p=0.1, training=self.training)
-
+class SimplifiedTerrainFeatureExtractor(nn.Module):
+    """简化版地形特征提取器 - 移除显存密集型操作"""
+    def __init__(self, in_channels):
+        super(SimplifiedTerrainFeatureExtractor, self).__init__()
+        
+        # 🔥 移除多尺度卷积 - 这是显存大户
+        # self.multi_scale_conv = ...  # 删除
+        
+        # 🔥 移除门控卷积 - 双路径消耗显存
+        # self.feature_fusion2 = ...  # 删除
+        
+        # 只保留基础的坡度提取
+        self.sobel_x = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
+        self.sobel_y = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
+        
+        # 🔥 简化特征融合 - 用标准卷积替代门控卷积
+        self.feature_fusion = nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=1),  # 1x1卷积，计算量小
+            nn.BatchNorm2d(in_channels * 2),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        
+        # 初始化Sobel滤波器
+        self._init_sobel_filters(in_channels)
+        
+    def _init_sobel_filters(self, in_channels):
+        with torch.no_grad():
+            sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
+            sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
+            
+            # 创建分组卷积核
+            sobel_x = sobel_x.reshape(1, 1, 3, 3).repeat(in_channels, 1, 1, 1)
+            sobel_y = sobel_y.reshape(1, 1, 3, 3).repeat(in_channels, 1, 1, 1)
+            
+            self.sobel_x.weight.data = sobel_x
+            self.sobel_y.weight.data = sobel_y
+        
+    def forward(self, x, mask, ismask=False):
+        if torch.isnan(x).any():
+            x = torch.nan_to_num(x, nan=0.0)
+            
+        # 计算基础坡度
+        grad_x = self.sobel_x(x)
+        grad_y = self.sobel_y(x)
+        slope = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-6)
+        slope = torch.clamp(slope, min=0.0, max=10.0)
+        
+        # 🔥 移除多尺度特征提取
+        # multi_scale_features = []  # 删除
+        # for conv in self.multi_scale_conv:  # 删除
+        #     multi_scale_features.append(conv(x))  # 删除
+        # multi_scale = torch.cat(multi_scale_features, dim=1)  # 删除
+        
+        # 🔥 简化组合：只有原始+坡度
+        combined = torch.cat([x, slope], dim=1)  # in_channels * 2
+        enhanced_features = self.feature_fusion(combined)  # 输出 in_channels * 2
+        
+        if ismask:
+            # 🔥 简化边缘mask处理 - 避免复杂的smooth_mask_generate_torch
+            # edge_mask = smooth_mask_generate_torch(mask, 1.0, False)  # 删除
+            # edge_mask = (edge_mask > 0.05).float()  # 删除
+            
+            # 直接使用原始mask，避免额外计算
+            features = torch.cat([enhanced_features, mask], dim=1)  # in_channels * 2 + 1
+        else:
+            features = enhanced_features  # in_channels * 2
+            
+        return F.dropout(features, p=0.1, training=self.training)
 
 class StabilizedSelfAttention(nn.Module):
     """稳定版自注意力模块"""
@@ -1031,242 +1098,254 @@ def smooth_mask_generate_torch(mask, sigma=1.0, visualize=False):
 
 
 class GlobalDiscriminator(nn.Module):
-    """减少深度的全局判别器 - 从5层卷积减少到3层"""
-
+    """大卷积核优化的全局判别器 - 5层减少到3层"""
     def __init__(self, input_channels=1, input_size=600):
         super(GlobalDiscriminator, self).__init__()
         self.input_shape = (input_channels, input_size, input_size)
-
+        
         # 保持原有的地形特征提取器
         self.terrain_extractor = EnhancedTerrainFeatureExtractor(input_channels)
         # 计算通道数：原始 + 坡度 + 掩码
         enhanced_channels = input_channels * 2 + 1
-
+        
         # 保持原有的空间注意力模块
         self.spatial_attention = nn.Sequential(
             spectral_norm(nn.Conv2d(enhanced_channels, 16, kernel_size=7, padding=3)),
             nn.BatchNorm2d(16),
             nn.LeakyReLU(0.2, inplace=True),
             spectral_norm(nn.Conv2d(16, 1, kernel_size=7, padding=3)),
-            nn.Sigmoid(),
+            nn.Sigmoid()
         )
-
-        # 🔽 减少卷积层：从5层减少到3层
-        # 第一层卷积 - 使用门控卷积处理掩码
+        
+        # 🔥 大卷积核策略：用3层大卷积核替代5层小卷积核
+        # 第一层：大卷积核 + 大步长，快速下采样
         self.conv1 = DisGatedConv2d(
-            enhanced_channels,
-            128,
-            kernel_size=4,
-            stride=2,
-            padding=1,  # 直接跳到128通道
+            enhanced_channels, 64, kernel_size=8, stride=4, padding=2  # 8x8核，stride=4
         )
-        self.bn1 = nn.BatchNorm2d(128)
+        self.bn1 = nn.BatchNorm2d(64)
         self.act1 = nn.LeakyReLU(0.2, inplace=True)
+        # 输出尺寸：600 → 150
 
-        # 第二层卷积 - 增大通道数补偿深度减少
-        self.conv2 = DisGatedConv2d(128, 256, kernel_size=4, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(256)
+        # 第二层：中等卷积核 + 中等步长
+        self.conv2 = DisGatedConv2d(
+            64, 128, kernel_size=6, stride=3, padding=1  # 6x6核，stride=3
+        )
+        self.bn2 = nn.BatchNorm2d(128)
         self.act2 = nn.LeakyReLU(0.2, inplace=True)
+        # 输出尺寸：150 → 50
 
-        # 第三层卷积 - 最后一层卷积
-        self.conv3 = nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1)
-        self.bn3 = nn.BatchNorm2d(512)
+        # 第三层：大卷积核，充分下采样到小尺寸
+        self.conv3 = nn.Conv2d(
+            128, 256, kernel_size=7, stride=5, padding=1  # 7x7核，stride=5
+        )
+        self.bn3 = nn.BatchNorm2d(256)
         self.act3 = nn.LeakyReLU(0.2, inplace=True)
+        # 输出尺寸：50 → 10
 
-        # 保持原有的自注意力机制（在更浅的层上应用）
-        self.self_attention = StabilizedSelfAttention(512)
+        # 保持自注意力机制，但在更小的特征图上(10x10)
+        self.self_attention = StabilizedSelfAttention(256)
 
-        # 🗑️ 移除第四层和第五层卷积
-        # self.conv4 = ...  # 删除
-        # self.conv5 = ...  # 删除
-
-        # 全连接层 - 重新计算特征尺寸
+        # 最终全局池化，确保固定输出尺寸
+        self.final_pool = nn.AdaptiveAvgPool2d(4)  # 强制到4x4
         self.flatten = nn.Flatten()
-
-        # 重新计算特征尺寸：经过3次下采样后的特征图大小
-        h = w = input_size
-        for _ in range(3):  # 改为3层卷积，每层stride=2
-            h = (h + 2 * 1 - 4) // 2 + 1
-            w = (w + 2 * 1 - 4) // 2 + 1
-
-        self.feature_size = 512 * h * w
-
-        # 保持原有的线性层结构
+        
+        # 固定特征尺寸：256 * 4 * 4 = 4,096
+        self.feature_size = 256 * 4 * 4
+        
         self.linear = nn.Sequential(
             spectral_norm(nn.Linear(self.feature_size, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(0.5)
         )
 
     def forward(self, globalin, mask):
-        # 检查输入是否包含NaN
         if torch.isnan(globalin).any():
             print("警告: GlobalDiscriminator输入包含NaN!")
             globalin = torch.nan_to_num(globalin, nan=0.0)
-
+            
         mask = mask.float()
-
-        # 保持原有的地形特征提取
+        
+        # 提取地形特征
         terrain_features = self.terrain_extractor(globalin, mask)
-
+        
         # 拼接特征和掩码
         x = torch.cat([terrain_features, mask], dim=1)
-
-        # 保持原有的空间注意力应用
+        
+        # 应用空间注意力
         attention = self.spatial_attention(x)
         x = x * attention
-
+        
         # 创建下采样掩码进行跟踪
         current_mask = mask
-
-        # 🔽 简化的卷积层序列
-        # 第一层卷积
+        
+        # 第一层：大卷积核快速下采样
         x = self.conv1(x, current_mask)
         x = self.bn1(x)
         x = self.act1(x)
-        current_mask = F.interpolate(current_mask, scale_factor=0.5, mode="nearest")
-
-        # 第二层卷积
+        current_mask = F.interpolate(current_mask, scale_factor=0.25, mode='nearest')  # stride=4
+        
+        # 第二层：中等卷积核
         x = self.conv2(x, current_mask)
         x = self.bn2(x)
         x = self.act2(x)
-        current_mask = F.interpolate(current_mask, scale_factor=0.5, mode="nearest")
-
-        # 第三层卷积（最后一层）
+        
+        # 第三层：最终下采样
         x = self.conv3(x)
         x = self.bn3(x)
         x = self.act3(x)
 
-        # 保持原有的自注意力应用
+        # 应用自注意力（在小特征图上，显存友好）
         x = self.self_attention(x)
 
-        # 扁平化并检查尺寸
+        # 最终池化到固定尺寸
+        x = self.final_pool(x)
         x = self.flatten(x)
-
-        # 检查实际特征尺寸与预期尺寸是否匹配
-        if x.size(1) != self.feature_size:
-            print(f"警告: 特征尺寸不匹配! 预期 {self.feature_size}，实际 {x.size(1)}")
-            if not hasattr(self, "_feature_size_adjusted") and not self.training:
-                self._feature_size_adjusted = True
-                self.linear = nn.Sequential(
-                    spectral_norm(nn.Linear(x.size(1), 1024)),
-                    nn.LeakyReLU(0.2, inplace=True),
-                    nn.Dropout(0.5),
-                )
-
+        
+        # print(f"GlobalDiscriminator - After pooling and flatten: {x.shape}")
+        # print(f"Expected feature_size: {self.feature_size}")
+        
         # 全连接层
         x = self.linear(x)
-
-        # 检查输出是否包含NaN
+        
+        # print(f"GlobalDiscriminator - Final output: {x.shape}")
+        
         if torch.isnan(x).any():
-            print("警告: GlobalDiscriminator输出包含NaN!")
             x = torch.nan_to_num(x, nan=0.0)
 
         return x
 
 
 class LocalDiscriminator(nn.Module):
-    """减少深度的局部判别器 - 从4层卷积减少到3层"""
-
+    """保守优化的局部判别器 - 保持4层，减少通道数"""
     def __init__(self, input_channels=1, input_size=33):
         super(LocalDiscriminator, self).__init__()
         self.input_shape = (input_channels, input_size, input_size)
-
+        
         # 保持原有的地形特征提取器
         self.terrain_extractor = EnhancedTerrainFeatureExtractor(input_channels)
         # 计算输出通道数：原始 + 坡度 + 掩码
         terrain_channels = input_channels * 3
-
-        # 🔽 减少卷积层：从4层减少到3层
-        # 第一层卷积 - 增大通道数补偿深度减少
-        self.conv1 = spectral_norm(
-            nn.Conv2d(terrain_channels, 128, kernel_size=4, stride=2, padding=1)
-        )
-        self.bn1 = nn.BatchNorm2d(128)
-        self.act1 = nn.LeakyReLU(0.2, inplace=True)
+        
+        # 🔧 保守策略：保持4层结构，使用标准卷积核，减少通道数
+        # 第一层卷积 - 使用谱归一化
+        self.conv1 = GatedConv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1,
+                        pad_type='reflect', activation='lrelu', norm='bn')
 
         # 第二层卷积
-        self.conv2 = spectral_norm(
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)
-        )
-        self.bn2 = nn.BatchNorm2d(256)
-        self.act2 = nn.LeakyReLU(0.2, inplace=True)
+        self.conv2 = GatedConv2d(64, 128, kernel_size=4, stride=2, padding=1,
+                        pad_type='reflect', activation='lrelu', norm='bn')
+        
+        # 第三层卷积
+        self.conv3 = GatedConv2d(128, 256, kernel_size=4, stride=2, padding=1,
+                        pad_type='reflect', activation='lrelu', norm='bn')
 
-        # 第三层卷积 - 最后一层卷积
-        self.conv3 = spectral_norm(
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1)
-        )
-        self.bn3 = nn.BatchNorm2d(512)
-        self.act3 = nn.LeakyReLU(0.2, inplace=True)
+        # 第四层卷积 - 最后一层卷积
+        self.conv4 = GatedConv2d(256, 512, kernel_size=4, stride=2, padding=1,
+                        pad_type='reflect', activation='lrelu', norm='bn')
 
-        # 🗑️ 移除第四层卷积
-        # self.conv4 = ...  # 删除
-
-        # 全连接层 - 重新计算特征尺寸
+        # 标准展平
         self.flatten = nn.Flatten()
-
-        # 重新计算特征尺寸：经过3次下采样后的特征图大小
+        
+        # 📏 修复特征尺寸计算 - 使用正确的公式和最终通道数
         h = w = input_size
-        for _ in range(3):  # 改为3层卷积，每层stride=2
-            h = (h + 2 * 1 - 4) // 2 + 1
-            w = (w + 2 * 1 - 4) // 2 + 1
-
-        self.feature_size = 512 * h * w
-
-        # 保持原有的线性层结构
+        print(f"LocalDiscriminator __init__ - Initial size: {h}x{w}")
+        
+        # 计算每层卷积后的尺寸变化
+        for layer in range(4):  # 4层卷积，每层stride=2, padding=1, kernel=4
+            h_new = (h + 2 * 1 - 4) // 2 + 1  # (input + 2*padding - kernel) // stride + 1
+            w_new = (w + 2 * 1 - 4) // 2 + 1
+            print(f"LocalDiscriminator __init__ - Layer {layer+1}: {h}x{w} -> {h_new}x{w_new}")
+            h, w = h_new, w_new
+        
+        # 🔧 关键修复：使用最后一层的通道数512而不是256
+        final_channels = 512  # conv4的输出通道数
+        self.feature_size = final_channels * h * w
+        
+        '''print(f"LocalDiscriminator __init__ - Final calculation:")
+        print(f"  - Final spatial size: {h}x{w}")
+        print(f"  - Final channels: {final_channels}")
+        print(f"  - Calculated feature_size: {self.feature_size}")'''
+        
+        # 保持输出1024维
         self.linear = nn.Sequential(
             spectral_norm(nn.Linear(self.feature_size, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(0.5)
         )
 
     def forward(self, local, mask):
-        # 检查输入是否包含NaN
         if torch.isnan(local).any():
             print("警告: LocalDiscriminator输入包含NaN!")
             local = torch.nan_to_num(local, nan=0.0)
-
-        # 保持原有的地形特征提取
+            
+        # print(f"LocalDiscriminator - Input shape: {local.shape}, {mask.shape}")
+        
+        # 提取地形特征
         x = self.terrain_extractor(local, mask, True)
-
-        # 🔽 简化的卷积层序列
+        # print(f"LocalDiscriminator - After terrain_extractor: {x.shape}")
+        
         # 第一层卷积
-        x = self.act1(self.bn1(self.conv1(x)))
-
+        x = self.conv1(x)
+        # print(f"LocalDiscriminator - After conv1: {x.shape}")
+        
         # 第二层卷积
-        x = self.act2(self.bn2(self.conv2(x)))
-
-        # 第三层卷积（最后一层）
-        x = self.act3(self.bn3(self.conv3(x)))
+        x = self.conv2(x)
+        # print(f"LocalDiscriminator - After conv2: {x.shape}")
+        
+        # 第三层卷积
+        x = self.conv3(x)
+        # print(f"LocalDiscriminator - After conv3: {x.shape}")
+        
+        # 第四层卷积
+        x = self.conv4(x)
+        # print(f"LocalDiscriminator - After conv4: {x.shape}")
 
         # 特征展平
         x = self.flatten(x)
-
-        # 检查实际特征尺寸与预期尺寸是否匹配
-        if x.size(1) != self.feature_size:
-            print(f"警告: 特征尺寸不匹配! 预期 {self.feature_size}，实际 {x.size(1)}")
-            if not hasattr(self, "_feature_size_adjusted") and not self.training:
+        # print(f"LocalDiscriminator - After flatten: {x.shape}")
+        # print(f"LocalDiscriminator - Expected feature_size: {self.feature_size}")
+        
+        # 🔧 改进的维度检查和动态调整
+        actual_feature_size = x.size(1)
+        if actual_feature_size != self.feature_size:
+            print(f"⚠️ LocalDiscriminator特征尺寸不匹配!")
+            print(f"   预期: {self.feature_size}")
+            print(f"   实际: {actual_feature_size}")
+            print(f"   比例: {actual_feature_size / self.feature_size:.2f}")
+            
+            # 重新创建线性层以匹配实际尺寸
+            if not hasattr(self, '_feature_size_adjusted'):
                 self._feature_size_adjusted = True
+                print(f"   🔧 动态调整线性层输入维度: {actual_feature_size} -> 1024")
                 self.linear = nn.Sequential(
-                    spectral_norm(nn.Linear(x.size(1), 1024)),
+                    spectral_norm(nn.Linear(actual_feature_size, 1024)),
                     nn.LeakyReLU(0.2, inplace=True),
-                    nn.Dropout(0.5),
-                )
-
+                    nn.Dropout(0.5)
+                ).to(x.device)
+                
+                # 更新feature_size以避免重复警告
+                self.feature_size = actual_feature_size
+        
         # 全连接层
         x = self.linear(x)
-
-        # 检查输出是否包含NaN
+        # print(f"LocalDiscriminator - Final output: {x.shape}")
+        
         if torch.isnan(x).any():
-            print("警告: LocalDiscriminator输出包含NaN!")
             x = torch.nan_to_num(x, nan=0.0)
 
         return x
 
+# 🔧 辅助函数：精确计算卷积层输出尺寸
+def calculate_conv_output_size(input_size, kernel_size, stride, padding):
+    """
+    精确计算卷积层输出尺寸
+    公式: output_size = (input_size + 2*padding - kernel_size) // stride + 1
+    """
+    return (input_size + 2 * padding - kernel_size) // stride + 1
+
 
 class ContextDiscriminator(nn.Module):
-    """保持不变的上下文判别器 - 只使用减少深度后的子网络"""
-
+    """保持原有结构的上下文判别器"""
     def __init__(
         self,
         local_input_channels=1,
@@ -1275,8 +1354,8 @@ class ContextDiscriminator(nn.Module):
         global_input_size=600,
     ):
         super(ContextDiscriminator, self).__init__()
-
-        # 使用减少深度后的局部判别器和全局判别器
+        
+        # 使用大卷积核优化后的判别器
         self.model_ld = LocalDiscriminator(
             input_channels=local_input_channels, input_size=local_input_size
         )
@@ -1284,15 +1363,15 @@ class ContextDiscriminator(nn.Module):
             input_channels=global_input_channels, input_size=global_input_size
         )
 
-        # 保持原有的扁平化层
+        # 扁平化层
         self.flatten_ld = nn.Flatten()
         self.flatten_gd = nn.Flatten()
 
-        # 保持原有的特征融合层
+        # 保持原有的特征融合层 - 修复维度匹配问题
         self.fusion = nn.Sequential(
-            spectral_norm(nn.Linear(1024 + 1024, 1024)),
+            spectral_norm(nn.Linear(1024 + 1024, 1024)),  # 确保输入是2048维
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.6),
+            nn.Dropout(0.6)
         )
 
         # 保持原有的分类器
@@ -1300,13 +1379,17 @@ class ContextDiscriminator(nn.Module):
             spectral_norm(nn.Linear(1024, 512)),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.5),
-            spectral_norm(nn.Linear(512, 1)),
+            spectral_norm(nn.Linear(512, 1))
         )
 
     def forward(self, x_ld, x_lm, x_gd, x_gm):
-        # 通过减少深度后的局部和全局判别器
-        x_ld = self.model_ld(x_ld, x_lm)  # 1024维特征
-        x_gd = self.model_gd(x_gd, x_gm)  # 1024维特征
+        # 通过大卷积核优化后的判别器
+        x_ld = self.model_ld(x_ld, x_lm)  # 应该是1024维特征
+        x_gd = self.model_gd(x_gd, x_gm)  # 应该是1024维特征
+
+        # 调试信息
+        # print(f"Local features shape: {x_ld.shape}")
+        # print(f"Global features shape: {x_gd.shape}")
 
         # 确保形状正确
         if len(x_ld.shape) > 2:
@@ -1314,23 +1397,24 @@ class ContextDiscriminator(nn.Module):
         if len(x_gd.shape) > 2:
             x_gd = self.flatten_gd(x_gd)
 
+        # print(f"After flatten - Local: {x_ld.shape}, Global: {x_gd.shape}")
+
         # 连接特征
         combined = torch.cat([x_ld, x_gd], dim=1)
-
+        # print(f"Combined features shape: {combined.shape}")
+        
         # 融合特征
         fused = self.fusion(combined)
+        # print(f"Fused features shape: {fused.shape}")
 
         # 输出logits
         logits = self.classifier(fused)
-
-        # 检查logits是否包含NaN
+        
         if torch.isnan(logits).any():
             print("警告: ContextDiscriminator输出包含NaN!")
             logits = torch.zeros_like(logits, device=logits.device)
 
-        # 返回logits和特征
         return logits, x_ld, x_gd
-
 
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

@@ -433,63 +433,6 @@ def simple_dataset_split(dataset, test_ratio=0.1, val_ratio=0.2, seed=42):
     
     return train_dataset, val_dataset, test_dataset
 
-def simple_consistent_dataset_split(dataset, test_ratio=0.1, val_ratio=0.1, seed=42):
-    """
-    简洁的一致性数据集分割
-    
-    保证：
-    1. 测试集的原始数据部分始终固定
-    2. 测试集包含对应的合成数据
-    3. 无缓存，无复杂验证，最小化代码
-    """
-    np.random.seed(seed)
-    
-    original_length = dataset.original_length
-    total_length = len(dataset)
-    
-    # 1. 固定选择测试集的原始数据（使用确定性方法）
-    original_test_size = int(original_length * test_ratio)
-    
-    # 等间隔采样确保每次都一样
-    step = max(1, original_length // original_test_size)
-    original_test_indices = list(range(0, original_length, step))[:original_test_size]
-    
-    # 2. 为测试集原始数据生成对应的合成数据索引
-    synthetic_test_indices = []
-    if dataset.enable_synthetic_masks and total_length > original_length:
-        synthetic_start = original_length
-        for orig_idx in original_test_indices:
-            synthetic_idx = synthetic_start + (orig_idx % dataset.synthetic_length)
-            if synthetic_idx < total_length:
-                synthetic_test_indices.append(synthetic_idx)
-    
-    # 3. 剩余数据分配给训练集和验证集
-    remaining_original = [i for i in range(original_length) if i not in original_test_indices]
-    remaining_synthetic = [i for i in range(original_length, total_length) if i not in synthetic_test_indices]
-    
-    # 验证集
-    original_val_size = int(len(remaining_original) * val_ratio)
-    synthetic_val_size = int(len(remaining_synthetic) * val_ratio) if remaining_synthetic else 0
-    
-    np.random.shuffle(remaining_original)
-    np.random.shuffle(remaining_synthetic)
-    
-    original_val_indices = remaining_original[:original_val_size]
-    original_train_indices = remaining_original[original_val_size:]
-    
-    synthetic_val_indices = remaining_synthetic[:synthetic_val_size]
-    synthetic_train_indices = remaining_synthetic[synthetic_val_size:]
-    
-    # 4. 合并索引
-    test_indices = original_test_indices + synthetic_test_indices
-    val_indices = original_val_indices + synthetic_val_indices
-    train_indices = original_train_indices + synthetic_train_indices
-    
-    # 5. 创建数据集
-    from torch.utils.data import Subset
-    return Subset(dataset, train_indices), Subset(dataset, val_indices), Subset(dataset, test_indices)
-
-
 def generate_target_mask(batch_global_masks, metadata):
     """
     生成target mask，并验证是否包含global_masks的所有1值
@@ -732,7 +675,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
         # Training parameters
         steps_1 = 150000  # Phase 1 training steps
-        steps_2 = 100000   # Phase 2 training steps
+        steps_2 = 50000   # Phase 2 training steps
         steps_3 = 200000  # Phase 3 training steps
 
         snaperiod_1 = 500   # How often to save snapshots in phase 1
@@ -918,7 +861,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             raise
         
         # ==================== 简洁的数据分割（仅需这几行）====================
-        train_dataset, val_dataset, test_dataset = simple_consistent_dataset_split(
+        train_dataset, val_dataset, test_dataset = simple_dataset_split(
             full_dataset, 
             test_ratio=0.1,    # 10% 测试集
             val_ratio=0.1,    # 25% 验证集（从剩余90%中取）
@@ -1048,7 +991,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 
             if phase==2:
                 # Load pre-trained weights if available
-                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_best"
+                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results19\phase_1\model_cn_step150000"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(torch.load(pretrained_weights_path, map_location=device, weights_only=True))
@@ -1065,7 +1008,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CN预训练权重失败: {e}")
                         
-                pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results17\phase_2\model_cd_best"
+                pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results19p2\phase_2\model_cd_step43000"
                 if os.path.exists(pretrained_weights_path_cd):
                     try:
                         model_cd.load_state_dict(torch.load(pretrained_weights_path_cd, map_location=device, weights_only=True))
@@ -2005,22 +1948,13 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             print("开始/继续第2阶段训练...")
             try:
                 # 使用Adam优化器
-                opt_cd_p2 = torch.optim.Adam(model_cd.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8)
-                if cd_lr is not None:
-                    opt_cd_p2.param_groups[0]['lr'] = cd_lr  # 设置初始学习率
+                opt_cd = torch.optim.Adam(model_cd.parameters(), lr=2e-5, betas=(0.5, 0.999), eps=1e-8)
                 
                 # 创建梯度缩放器，用于自动混合精度训练
                 scaler2 = GradScaler(enabled=True)
                 
                 # 创建学习率调度器 - 只使用一种调度器
-                #scheduler = CosineAnnealingLR(opt_cd_p2, T_max=steps_2, eta_min=1e-8)
-                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    opt_cd_p2, mode='max', factor=0.8, patience=1000, 
-                    threshold=0.01, min_lr=1e-6
-                )
-                
-                
-                stability_tracker_cd = StabilityTracker()
+                scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-6)
                 
                 # 实例噪声初始值和最小值
                 start_noise = 0.1
@@ -2033,15 +1967,13 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 patience_counter = 0
                 max_patience = 10  # 增加耐心值，避免过早降低学习率
                 
-                accumulated_step = 0
-                
                 pbar = tqdm(total=steps_2, initial=step_phase2)
                 step = step_phase2
                 while step < steps_2:
                     for batch in train_loader:
                         try:
                             # 定期检查内存
-                            if step % 10 == 0:
+                            if step % 50 == 0:
                                 check_memory_and_cleanup(threshold_gb=8.0)
                             
                             # 准备批次数据
@@ -2055,11 +1987,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 batch_global_targets,
                                 metadata,
                             ) = batch_data
-                            
-                            global_target_masks = generate_target_mask(batch_global_masks, metadata)
-                            # 确保global_target_masks是tensor
-                            if isinstance(global_target_masks, tuple):
-                                global_target_masks = global_target_masks[0]
                             
                             # 使用自动混合精度
                             with autocast(device_type=device.type, dtype=torch.float32, enabled=True):
@@ -2078,17 +2005,16 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 
                                 # 应用实例噪声
                                 batch_local_targets_noisy = batch_local_targets + torch.randn_like(batch_local_targets) * noise_level
-                                fake_outputs_noisy = fake_outputs + torch.randn_like(fake_outputs) * noise_level * 1.5
+                                fake_outputs_noisy = fake_outputs + torch.randn_like(fake_outputs) * noise_level
                                 
                                 # 嵌入假输出到全局
-                                ## ####################!!! 注意: embedding in global targets instead of global inputs#############################
                                 fake_global_embedded, fake_global_mask_embedded, _ = merge_local_to_global(
-                                    fake_outputs_noisy, batch_global_targets, batch_global_masks, metadata
+                                    fake_outputs_noisy, batch_global_inputs, batch_global_masks, metadata
                                 )
                                 
                                 # 嵌入真实输入到全局
                                 real_global_embedded, real_global_mask_embedded, _ = merge_local_to_global(
-                                    batch_local_targets_noisy, batch_global_targets, batch_global_masks, metadata
+                                    batch_local_targets_noisy, batch_global_inputs, batch_global_masks, metadata
                                 )
                                 
                                 # 创建平滑标签
@@ -2102,7 +2028,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     fake_outputs_noisy,
                                     batch_local_masks,
                                     fake_global_embedded,
-                                    global_target_masks, # fake_global_mask_embedded,
+                                    fake_global_mask_embedded,
                                 )
                                 
                                 # 训练判别器处理真实样本
@@ -2111,32 +2037,26 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     batch_local_targets_noisy,
                                     batch_local_masks,
                                     real_global_embedded,
-                                    global_target_masks, #real_global_mask_embedded,
+                                    real_global_mask_embedded,
                                 )
                                 
-                                # 获取动态权重
-                                
-                                real_weight, fake_weight = stability_tracker_cd.get_loss_weights()
                                 # 使用BCEWithLogitsLoss代替BCE或自定义损失
-                                loss_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)# *real_weight
-                                loss_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)# *fake_weight
+                                loss_real = F.binary_cross_entropy_with_logits(real_predictions, real_labels)
+                                loss_fake = F.binary_cross_entropy_with_logits(fake_predictions, fake_labels)
                                 
                                 # 计算特征匹配损失
-                                fm_weight = 0.5
-                                '''fm_loss = feature_contrastive_loss(
-                                    real_lf, real_gf, fake_lf, fake_gf) * fm_weight'''
-                                fm_loss = enhanced_feature_contrastive_loss(
+                                fm_weight = 4
+                                fm_loss = feature_contrastive_loss(
                                     real_lf, real_gf, fake_lf, fake_gf) * fm_weight
                                 lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
-                                ############################!!!!!!!!!!!!!!!
                                 r1_loss = r1_regularization(
                                     model_cd,
                                     batch_local_targets_noisy,
                                     batch_local_masks,
                                     real_global_embedded,
-                                    global_target_masks  # real_global_mask_embedded
-                                )*1e3
-
+                                    real_global_mask_embedded
+                                )
+                                
                                 # 使用sigmoid计算预测概率，用于准确率计算
                                 with torch.no_grad():
                                     real_probs = torch.sigmoid(real_predictions)
@@ -2147,37 +2067,30 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     avg_acc = (real_acc + fake_acc) / 2
 
                                 # 动态调整损失权重，平衡训练
-                                if real_acc < 0.15 and fake_acc > 0.85:
+                                if real_acc < 0.1 and fake_acc > 0.9:
                                     loss_real *= 5.0
                                     loss_fake *= 0.5
-                                    print("\nloss real weight strengthened")
-                                elif fake_acc < 0.15 and real_acc > 0.85:
+                                    print("loss real weight strengthened")
+                                elif fake_acc < 0.1 and real_acc > 0.9:
                                     loss_real *= 0.5
                                     loss_fake *= 5.0
-                                    print("\nloss fake weight strengthened")
-                                loss = (loss_real + loss_fake + fm_loss + lsb_loss + r1_loss)/accumulation_steps
-                                # print(f"loss_real: {loss_real.item():.4f}, loss_fake: {loss_fake.item():.4f}, fm_loss: {fm_loss.item():.4f}, lsb_loss: {lsb_loss.item():.4f}, r1_loss: {r1_loss.item():.4f}")
+                                    print("loss fake weight strengthened")
+                                loss = loss_real + loss_fake + fm_loss + lsb_loss + r1_loss
                             
                             # 使用梯度缩放器进行反向传播
                             scaler2.scale(loss).backward()
                             
-                            accumulated_step += 1
+                            # 梯度裁剪
+                            scaler2.unscale_(opt_cd)
+                            torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
                             
-                            # 每accumulation_steps更新一次参数
-                            if accumulated_step % accumulation_steps == 0:
+                            # 更新参数
+                            scaler2.step(opt_cd)
+                            scaler2.update()
+                            opt_cd.zero_grad(set_to_none=True)
                             
-                                # 梯度裁剪
-                                scaler2.unscale_(opt_cd_p2)
-                                torch.nn.utils.clip_grad_norm_(model_cd.parameters(), max_norm=1.0)
-                                
-                                # 更新参数
-                                scaler2.step(opt_cd_p2)
-                                scaler2.update()
-                                opt_cd_p2.zero_grad(set_to_none=True)
-                                
-                                # 更新学习率 - 只使用调度器
-                                scheduler.step((real_acc+fake_acc)/2)
-                                stability_tracker_cd.update(real_acc, fake_acc, 0)
+                            # 更新学习率 - 只使用调度器
+                            scheduler.step()
                             
                             # 更新运行指标
                             running_loss += loss.item()
@@ -2203,11 +2116,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             
                             # 更新进度条
                             current_lr = scheduler.get_last_lr()[0]
-                            pbar.set_description(
-                                f"Phase 2 | loss: {loss.item():.4f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, lr: {current_lr:.1e}, "
-                                f"real_lf: {real_lf.mean().item():.4f}, real_gf: {real_gf.mean().item():.4f}, "
-                                f"fake_lf: {fake_lf.mean().item():.4f}, fake_gf: {fake_gf.mean().item():.4f}"
-                            )
+                            pbar.set_description(f"Phase 2 | loss: {loss.item():.4f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, lr: {current_lr:.1e}")
                             pbar.update(1)
                             
                             # Visdom可视化
@@ -2262,15 +2171,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     val_global_targets,
                                                     val_metadata,
                                                 ) = val_data
-                                                
-                                                val_global_targets_masks = generate_target_mask(
-                                                    val_global_masks,
-                                                    val_metadata
-                                                )
-                                                # 确保global_target_masks是tensor
-                                                if isinstance(val_global_targets_masks, tuple):
-                                                    val_global_targets_masks = val_global_targets_masks[0]
-
                                                 # 生成假样本
                                                 val_fake_outputs = safe_tensor_operation(
                                                     model_cn,
@@ -2281,17 +2181,16 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 )
                                                 
                                                 # 嵌入
-                                                ###########################!!!
                                                 val_fake_global_embedded, val_fake_global_mask_embedded, _ = merge_local_to_global(
                                                     val_fake_outputs,
-                                                    val_global_targets,
+                                                    val_global_inputs,
                                                     val_global_masks,
                                                     val_metadata,
                                                 )
                                                 
                                                 val_real_global_embedded, val_real_global_mask_embedded, _ = merge_local_to_global(
                                                     val_local_targets,
-                                                    val_global_targets,
+                                                    val_global_inputs,
                                                     val_global_masks,
                                                     val_metadata,
                                                 )
@@ -2301,7 +2200,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     val_fake_outputs,
                                                     val_local_masks,
                                                     val_fake_global_embedded,
-                                                    val_global_targets_masks, # val_fake_global_mask_embedded,
+                                                    val_fake_global_mask_embedded,
                                                 )
                                                 
                                                 val_real_preds, _, _ = safe_tensor_operation(
@@ -2309,7 +2208,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     val_local_targets,
                                                     val_local_masks,
                                                     val_real_global_embedded,
-                                                    val_global_targets_masks, # val_real_global_mask_embedded,
+                                                    val_real_global_mask_embedded,
                                                 )
                                                 val_fake_preds = torch.sigmoid(val_fake_preds)
                                                 val_real_preds = torch.sigmoid(val_real_preds)
@@ -2342,21 +2241,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         print(f"发现新的最佳模型，准确率: {val_accuracy:.4f}")
                                         patience_counter = 0
                                     else:
-                                        '''# 检测判别器崩溃
-                                        if stability_tracker_cd.is_collapsed():
-                                            print("检测到判别器不稳定，调整训练参数...")
-                                            # 降低学习率
+                                        patience_counter += 1
+                                        print(f"未见改善。耐心计数: {patience_counter}/{max_patience}")
+                                        '''# 如果长时间没有改善，降低学习率
+                                        if patience_counter >= max_patience:
                                             for param_group in opt_cd.param_groups:
                                                 param_group['lr'] *= 0.5
-                                                print(f"判别器学习率降低到: {param_group['lr']:.6f}")'''
-                                        '''patience_counter += 1
-                                        print(f"未见改善。耐心计数: {patience_counter}/{max_patience}")
-                                        # 如果长时间没有改善，降低学习率
-                                        if patience_counter >= max_patience:
-                                            for param_group in opt_cd_p2.param_groups:
-                                                param_group['lr'] *= 0.5
-                                            print(f"性能停滞，将学习率降低到: {opt_cd_p2.param_groups[0]['lr']:.6f}")
+                                            print(f"性能停滞，将学习率降低到: {opt_cd.param_groups[0]['lr']:.6f}")
                                             patience_counter = 0'''
+                                    
                                     
                                     # 保存模型
                                     
@@ -2392,7 +2285,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     model_cd.train()
                                     
                                     # 保存检查点
-                                    save_checkpoint(model_cn, model_cd, opt_cn_p1, opt_cd_p2, step, 2, result_dir, best_acc=best_acc, cd_lr = opt_cd_p2.param_groups[0]['lr'])
+                                    save_checkpoint(model_cn, model_cd, opt_cn_p1, opt_cd, step, 2, result_dir, best_acc=best_acc, cd_lr = opt_cd.param_groups[0]['lr'])
                                     
                                 except Exception as e:
                                     print(f"验证步骤失败: {e}")
@@ -2890,13 +2783,13 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\checkpoint_phase2_step14000.pth", help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=r"", help="resume from checkpoint path")
     parser.add_argument("--dir", type=str, default="results19p2", help="directory to save results")
     parser.add_argument("--envi", type=str, default="DEMp2i19", help="visdom environment name")
     parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
     parser.add_argument("--test", type=bool, default=False, help="whether to run in test mode")
-    parser.add_argument("--batch", type=int, default=4, help="batch size for training")
-    parser.add_argument("--phase", type=int, default=2, help="training phase to start from (1, 2, or 3)")
+    parser.add_argument("--batch", type=int, default=8, help="batch size for training")
+    parser.add_argument("--phase", type=int, default=3, help="training phase to start from (1, 2, or 3)")
     args = parser.parse_args()
     with visdom_server():
         viz = visdom.Visdom()    
