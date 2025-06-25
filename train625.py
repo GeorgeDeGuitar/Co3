@@ -1069,7 +1069,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         # Setup optimizers
         opt_cn_p1 = Adadelta(model_cn.parameters())
         opt_bqd = torch.optim.Adam(
-            model_bqd.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8
+            model_bqd.parameters(), lr=1e-3, betas=(0.5, 0.999), eps=1e-8
         )
         # opt_cd_p1 = Adadelta(model_cd.parameters())
         opt_cd_p2 = torch.optim.Adam(
@@ -1765,7 +1765,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 scaler = GradScaler()
                 scaler_bqd = GradScaler()
                 opt_cn_p1 = Adadelta(model_cn.parameters())
-                opt_bqd = torch.optim.Adam(model_bqd.parameters())
+                # opt_bqd = torch.optim.Adam(model_bqd.parameters())
                 if bqd_lr is not None:
                     opt_bqd.param_groups[0]["lr"] = bqd_lr
 
@@ -1822,23 +1822,22 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             )
 
                             # ==================== 四次独立的backward ====================
+                            # 开始训练时可能不成功，不成功则重试
+                            
                             if True:
-                                #### 第1次backward - BQD网络学习识别原始输入边缘 ####
-
-                                bqd_outputs_in, bqd_loss_in, _ = model_bqd(
-                                    batch_local_inputs, batch_local_masks
-                                )
-                                bqd_loss_in_scaled = bqd_loss_in / accumulation_steps * 2
-                                scaler_bqd.scale(bqd_loss_in_scaled).backward(
-                                    retain_graph=True
-                                )
-
-                                #### 第2次backward - BQD网络学习识别生成输出边缘 ####
+                                #### 第1次backward - BQD网络学习识别生成输出边缘 ####
+                                
                                 if outputs is not None:
-                                    bqd_outputs_out, bqd_loss_out, _ = model_bqd(
-                                        outputs,
+                                    if step>2000:
+                                        bqd_outputs_out, bqd_loss_out, _ = model_bqd(
+                                        outputs.detach(),
                                         batch_local_masks,  # detach阻止梯度传播到补全网络
                                     )
+                                    else:    
+                                        bqd_outputs_out, bqd_loss_out, _ = model_bqd(
+                                            outputs,
+                                            batch_local_masks,  # detach阻止梯度传播到补全网络
+                                        )
                                     bqd_loss_out_scaled = (
                                         bqd_loss_out / accumulation_steps * 2
                                     )
@@ -1851,6 +1850,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         "Warning: outputs is None, skipping BQD discriminator loss"
                                     )
                                     bqd_loss_out = torch.tensor(0.0, device=device)
+                                    
+                                #### 第2次backward - BQD网络学习识别原始输入边缘 ####
+                                bqd_outputs_in, bqd_loss_in, _ = model_bqd(
+                                    batch_local_inputs, batch_local_masks
+                                )
+                                bqd_loss_in_scaled = bqd_loss_in / accumulation_steps * 2
+                                scaler_bqd.scale(bqd_loss_in_scaled).backward(
+                                    retain_graph=True
+                                )
 
                             #### 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
                             if True:
