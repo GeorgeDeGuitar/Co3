@@ -91,7 +91,7 @@ class BoundaryQualityDiscriminator(nn.Module):
         loss_mask = loss_mask * 0.1
         print(f"loss_full: {loss_full.item()}, loss_mask: {loss_mask.item()}")
 
-        return extracted_boundary, loss_full, -loss_full
+        return extracted_boundary, loss_full, loss_mask
 
 
 class AdaptiveBoundaryLoss(nn.Module):
