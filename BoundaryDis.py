@@ -63,8 +63,9 @@ class BoundaryQualityDiscriminator(nn.Module):
         extracted_boundary = self.boundary_extractor(generated_data)
         # 二值化处理 ？？？？？？？？？？？？是否要二值化？？？？？？？？？？？？？？？？
         # extracted_boundary = (extracted_boundary >= 0.5).float()
-
-        true_boundary = self.ture_extractor(mask)  # 使用真实mask提取边界
+        
+        with torch.no_grad():
+            true_boundary = self.ture_extractor(mask)  # 使用真实mask提取边界
 
         # 评估提取质量（可选）
         """boundary_error = F.mse_loss(extracted_boundary, true_boundary, reduction="none")
@@ -89,7 +90,7 @@ class BoundaryQualityDiscriminator(nn.Module):
             print("Warning: mask_sum is zero, loss_mask will be zero.")
             loss_mask = loss_mask
         loss_mask = loss_mask * 0.1
-        print(f"loss_full: {loss_full.item()}, loss_mask: {loss_mask.item()}")
+        # print(f"loss_full: {loss_full.item()}, loss_mask: {loss_mask.item()}")
 
         return extracted_boundary, loss_full, loss_mask
 
@@ -123,7 +124,7 @@ class AdaptiveBoundaryLoss(nn.Module):
 
         if self.training_mode == "pretrain":
             # 预训练阶段：希望提取准确，minimize error
-            discriminator_loss = boundary_mse + 0.1 * boundary_l1
+            discriminator_loss = boundary_mse + 0.0 * boundary_l1
             loss_direction = "minimize_error"
 
         elif self.training_mode == "adversarial":

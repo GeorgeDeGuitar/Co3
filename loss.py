@@ -931,9 +931,9 @@ def completion_network_loss(
     # gradient_similarity = gradient_similarity_loss(output,local_target)*1000 # 梯度相似性损失，梯度方向的一致性
     # ssim = ssim_loss(output,local_target)*10
     # print(f"Consistency_loss: {consistency_loss}, SSIM loss: {ssim}, Gradient similarity loss: {gradient_similarity}, Variation loss: {variation_loss}, Mean shift loss: {mean_shift}")
-    print(
+    '''print(
         f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Boundary loss: {insm_loss*bw}"
-    )
+    )'''
     # return (null_loss * nw + bw * boundary_loss + edge_loss * ew + consistency_loss * cw + gradient_loss * cg + variation_loss*vw + gradient_similarity*gsw)/totalw
     return (null_loss * nw + consistency_loss * cw + fa_loss * faw + insm_loss * bw) / totalw
 

@@ -974,7 +974,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     step_phase1 = steps_1
                     step_phase2 = steps_2
                     step_phase3 = step
-                    best_val_loss_joint = best_val_loss
+                    best_val_loss_joint = float('inf') # best_val_loss
             except Exception as e:
                 print(f"加载检查点失败: {e}")
                 cleanup_memory()
@@ -2783,7 +2783,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\latest_checkpoint.pth", help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\checkpoint_phase3_step142000.pth", help="resume from checkpoint path")
     parser.add_argument("--dir", type=str, default="results19p2", help="directory to save results")
     parser.add_argument("--envi", type=str, default="DEMp2i19", help="visdom environment name")
     parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
