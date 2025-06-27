@@ -1654,7 +1654,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )
                             )
 
-                            fake_predictions, _, _, _ = safe_tensor_operation(
+                            fake_predictions, _, _ = safe_tensor_operation(
                                 model_cd,
                                 outputs,
                                 batch_local_masks,
@@ -1672,7 +1672,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )
                             )
 
-                            real_predictions, _, _,_ = safe_tensor_operation(
+                            real_predictions, _, _ = safe_tensor_operation(
                                 model_cd,
                                 batch_local_targets,
                                 batch_local_masks,
@@ -3240,7 +3240,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )
 
                                 # 判别器前向传播
-                                fake_predictions, fake_lf, fake_gf, fake_bf = (
+                                fake_predictions, fake_lf, fake_gf = (
                                     safe_tensor_operation(
                                         model_cd,
                                         fake_outputs_noisy,
@@ -3249,7 +3249,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         fake_global_mask_embedded,
                                     )
                                 )
-                                real_predictions, real_lf, real_gf, real_bf = (
+                                real_predictions, real_lf, real_gf = (
                                     safe_tensor_operation(
                                         model_cd,
                                         batch_local_targets_noisy,
@@ -3289,7 +3289,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 # 特征对比损失（减少权重）
                                 fm_loss_d = (
                                     feature_contrastive_loss(
-                                        real_lf, real_gf, real_bf, fake_lf, fake_gf, fake_bf
+                                        real_lf, real_gf, real_bf, 0, fake_gf, 0
                                     )
                                     * fm_weight
                                 )
@@ -3354,7 +3354,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         metadata,
                                     )
                                 )
-                                fake_predictions, fake_lf, fake_gf, fake_bf = (
+                                fake_predictions, fake_lf, fake_gf = (
                                     safe_tensor_operation(
                                         model_cd,
                                         fake_outputs,

@@ -64,8 +64,9 @@ class BoundaryQualityDiscriminator(nn.Module):
         # 二值化处理 ？？？？？？？？？？？？是否要二值化？？？？？？？？？？？？？？？？
         # extracted_boundary = (extracted_boundary >= 0.5).float()
         
-        with torch.no_grad():
-            true_boundary = self.ture_extractor(mask)  # 使用真实mask提取边界
+        # with torch.no_grad():
+        true_boundary = self.ture_extractor(mask)  # 使用真实mask提取边界
+        true_boundary = true_boundary.detach()
 
         # 评估提取质量（可选）
         """boundary_error = F.mse_loss(extracted_boundary, true_boundary, reduction="none")

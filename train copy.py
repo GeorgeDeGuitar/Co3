@@ -676,7 +676,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         # Training parameters
         steps_1 = 150000  # Phase 1 training steps
         steps_2 = 50000   # Phase 2 training steps
-        steps_3 = 200000  # Phase 3 training steps
+        steps_3 = 400000  # Phase 3 training steps
 
         snaperiod_1 = 500   # How often to save snapshots in phase 1
         snaperiod_2 = 500   # How often to save snapshots in phase 2
@@ -955,10 +955,23 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         best_val_loss_joint = float('inf')
         cn_lr = None
         cd_lr = None
+        interrupt = None
         
         # 如果指定了检查点文件，则加载它恢复训练
         if resume_from:
-            try:
+            import time
+            try:        
+                # 获取当前本地时间
+                current_time = time.localtime()
+
+                # 获取年月日
+                year = current_time.tm_year
+                month = current_time.tm_mon
+                day = current_time.tm_mday
+                hour = current_time.tm_hour    # 24小时制 (0-23)
+                minute = current_time.tm_min   # 分钟 (0-59)
+                interrupt = f"_{year}_{month}_{day}_{hour}_{minute}"
+                
                 step, phase, best_val_loss, best_acc, cn_lr, cd_lr = load_checkpoint(resume_from, model_cn, model_cd, opt_cn_p1, opt_cd_p2, device)
                 if phase == 1:
                     step, phase, best_val_loss, best_acc, cn_lr, cd_lr = load_checkpoint(resume_from, model_cn, model_cd, opt_cn_p1, opt_cd_p2, device)
@@ -974,7 +987,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     step_phase1 = steps_1
                     step_phase2 = steps_2
                     step_phase3 = step
-                    best_val_loss_joint = float('inf') # best_val_loss
+                    best_val_loss_joint = float("inf") # best_val_loss
             except Exception as e:
                 print(f"加载检查点失败: {e}")
                 cleanup_memory()
@@ -2289,6 +2302,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     
                                 except Exception as e:
                                     print(f"验证步骤失败: {e}")
+                                    traceback.print_exc()  # 打印详细的错误堆栈信息
                                     cleanup_memory()
                             
                             # 判断是否完成训练
@@ -2596,8 +2610,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     # 保存最佳模型
                                     if val_results['recon_loss'] < best_val_loss_joint:
                                         best_val_loss_joint = val_results['recon_loss']
-                                        cn_best_path = os.path.join(result_dir, "phase_3", "model_cn_best")
-                                        cd_best_path = os.path.join(result_dir, "phase_3", "model_cd_best")
+                                        cn_best_path = os.path.join(result_dir, "phase_3", "model_cn_best"+interrupt)
+                                        cd_best_path = os.path.join(result_dir, "phase_3", "model_cd_best"+interrupt)
                                         torch.save(model_cn.state_dict(), cn_best_path)
                                         torch.save(model_cd.state_dict(), cd_best_path)
                                         print(f"保存新的最佳模型 (重建损失: {val_results['recon_loss']:.4f})")
@@ -2783,7 +2797,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DEM completion network training") 
-    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\checkpoint_phase3_step142000.pth", help="resume from checkpoint path")
+    parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\latest_checkpoint.pth", help="resume from checkpoint path")
     parser.add_argument("--dir", type=str, default="results19p2", help="directory to save results")
     parser.add_argument("--envi", type=str, default="DEMp2i19", help="visdom environment name")
     parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
