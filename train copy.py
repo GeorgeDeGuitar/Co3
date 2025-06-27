@@ -2800,7 +2800,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", type=str, default=r"E:\KingCrimson Dataset\Simulate\data0\results19p2\latest_checkpoint.pth", help="resume from checkpoint path")
     parser.add_argument("--dir", type=str, default="results19p2", help="directory to save results")
     parser.add_argument("--envi", type=str, default="DEMp2i19", help="visdom environment name")
-    parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
     parser.add_argument("--test", type=bool, default=False, help="whether to run in test mode")
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument("--phase", type=int, default=3, help="training phase to start from (1, 2, or 3)")

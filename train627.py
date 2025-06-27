@@ -2317,8 +2317,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             fake_local_mean = fake_local_feat.mean(0)
             real_global_mean = real_global_feat.mean(0)
             fake_global_mean = fake_global_feat.mean(0)
-            real_boudnary_mean = real_boundary_feat.mean(0)
-            fake_boundary_mean = fake_boundary_feat.mean(0)
+            real_boudnary_mean = 0 # real_boundary_feat.mean(0)
+            fake_boundary_mean = 0 # fake_boundary_feat.mean(0)
 
             # 计算欧氏距离
             local_distance = torch.sqrt(
@@ -2327,10 +2327,10 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             global_distance = torch.sqrt(
                 torch.sum((real_global_mean - fake_global_mean) ** 2) + 1e-6
             )
-            boundary_distance = torch.sqrt(torch.sum((real_boudnary_mean - fake_boundary_mean) ** 2) + 1e-6)
+            # boundary_distance = torch.sqrt(torch.sum((real_boudnary_mean - fake_boundary_mean) ** 2) + 1e-6)
 
             # 对比损失 - 我们希望最大化距离（所以使用负号）
-            contrastive_loss = 1.0 / local_distance + 1.0 / global_distance + 1.0 / boundary_distance
+            contrastive_loss = 1.0 / local_distance + 1.0 / global_distance#  + 1.0 / boundary_distance
 
             return contrastive_loss
 
@@ -3289,7 +3289,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 # 特征对比损失（减少权重）
                                 fm_loss_d = (
                                     feature_contrastive_loss(
-                                        real_lf, real_gf, real_bf, 0, fake_gf, 0
+                                        real_lf, real_gf, 0, fake_lf, fake_gf, 0
                                     )
                                     * fm_weight
                                 )
