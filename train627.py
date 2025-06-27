@@ -1102,21 +1102,19 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         cd_lr = None
         bqd_lr = None
 
-        # 如果指定了检查点文件，则加载它恢复训练
-        if resume_from:
-            try:
-                
-                # 获取当前本地时间
-                current_time = time.localtime()
+        # 获取当前本地时间
+        current_time = time.localtime()
 
-                # 获取年月日
-                year = current_time.tm_year
-                month = current_time.tm_mon
-                day = current_time.tm_mday
-                hour = current_time.tm_hour    # 24小时制 (0-23)
-                minute = current_time.tm_min   # 分钟 (0-59)
-                interrupt = f"_{year}_{month}_{day}_{hour}_{minute}"
-                
+        # 获取年月日
+        year = current_time.tm_year
+        month = current_time.tm_mon
+        day = current_time.tm_mday
+        hour = current_time.tm_hour    # 24小时制 (0-23)
+        minute = current_time.tm_min   # 分钟 (0-59)
+        # 如果指定了检查点文件，则加载它恢复训练
+        interrupt = f"_{year}_{month}_{day}_{hour}_{minute}"
+        if resume_from:
+            try: 
                 step, phase, best_val_loss, best_acc, cn_lr, cd_lr, bqd_lr = (
                     load_checkpoint(
                         resume_from,
@@ -1641,7 +1639,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             real_labels = torch.ones(batch_size, 1, device=device)
                             fake_labels = torch.zeros(batch_size, 1, device=device)
                             
-                            _, bqd_total_loss, mask_loss = model_bqd(outputs, batch_local_masks)
+                            bqd_in,_,_ = model_bqd(batch_local_inputs, batch_local_masks)
+                            bqd_out, bqd_total_loss, mask_loss = model_bqd(outputs, batch_local_masks)
                             recon_loss_sum += mask_loss.item()
 
                             # 将生成器输出传递给判别器
@@ -1734,7 +1733,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     "real_acc": avg_real_acc,
                     "fake_acc": avg_fake_acc,
                     "disc_acc": avg_disc_acc,
-                    "bqd_loss": bqd_loss
+                    "bqd_loss": bqd_loss,
+                    "bqd_in": bqd_in,
+                    "bqd out": bqd_out
                 }
 
             except Exception as e:
@@ -3612,10 +3613,10 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     if val_results["recon_loss"] < best_val_loss_joint:
                                         best_val_loss_joint = val_results["recon_loss"]
                                         cn_best_path = os.path.join(
-                                            result_dir, "phase_3", "model_cn_best", interrupt
+                                            result_dir, "phase_3", "model_cn_best"+interrupt
                                         )
                                         cd_best_path = os.path.join(
-                                            result_dir, "phase_3", "model_cd_best", interrupt
+                                            result_dir, "phase_3", "model_cd_best"+interrupt
                                         )
                                         torch.save(model_cn.state_dict(), cn_best_path)
                                         torch.save(model_cd.state_dict(), cd_best_path)
@@ -3660,6 +3661,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 test_local_targets,
                                                 test_local_inputs,
                                                 test_output,
+                                                None,
+                                                None,
                                                 completed,
                                                 step,
                                                 "phase_3",
