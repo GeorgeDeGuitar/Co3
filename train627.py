@@ -1722,7 +1722,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 avg_real_acc = real_acc_sum / max(total_batches, 1)
                 avg_fake_acc = fake_acc_sum / max(total_batches, 1)
                 avg_disc_acc = (avg_real_acc + avg_fake_acc) / 2
-                bqd_loss = bqd_total_loss / max(total_batches, 1)
+                bqd_loss = bqd_loss_sum / max(total_batches, 1)
 
                 # 将模型设回训练模式
                 model_cn.train()
