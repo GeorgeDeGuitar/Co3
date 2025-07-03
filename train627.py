@@ -3428,11 +3428,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                                 # 组合生成器损失并标准化
                                 loss_cn = (
-                                    loss_cn_recon + alpha_g * loss_cn_adv + bloss*0.5
+                                    loss_cn_recon + alpha_g * loss_cn_adv + bloss
                                 ) / accumulation_steps
 
                             # 生成器反向传播
-                            scaler_cn.scale(loss_cn).backward(retain_graph=True)
+                            scaler_cn.scale(loss_cn).backward(retain_graph=False)
                             
                                 
 
