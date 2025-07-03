@@ -1584,6 +1584,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 # 初始化各种损失和指标
                 recon_loss_sum = 0.0
                 adv_loss_sum = 0.0
+                bqd_loss_sum = 0.0
                 real_acc_sum = 0.0
                 fake_acc_sum = 0.0
                 total_batches = 0
@@ -1641,7 +1642,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             
                             bqd_in,_,_ = model_bqd(batch_local_inputs, batch_local_masks)
                             bqd_out, bqd_total_loss, mask_loss = model_bqd(outputs, batch_local_masks)
-                            recon_loss_sum += mask_loss.item()
+                            bqd_loss_sum += mask_loss.item()
+                            # recon_loss_sum += mask_loss.item()
 
                             # 将生成器输出传递给判别器
                             fake_global_embedded, fake_global_mask_embedded, _ = (
@@ -1734,8 +1736,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     "fake_acc": avg_fake_acc,
                     "disc_acc": avg_disc_acc,
                     "bqd_loss": bqd_loss,
-                    "bqd_in": bqd_in,
-                    "bqd out": bqd_out
                 }
 
             except Exception as e:
@@ -3185,6 +3185,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # ==================== 训练判别器 ====================
                             for param in model_cn.parameters():
                                 param.requires_grad = False
+                            for param in model_bqd.parameters():
+                                param.requires_grad = False
                             for param in model_cd.parameters():
                                 param.requires_grad = True
 
@@ -3305,10 +3307,64 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # 判别器反向传播
                             scaler_cd.scale(loss_cd).backward()
                             
-                                 
+                            # =================== 训练BQD =======================
+                            for param in model_bqd.parameters():
+                                param.requires_grad = True
+                            for param in model_cn.parameters():
+                                param.requires_grad = False
+                            for param in model_cd.parameters():
+                                param.requires_grad = False
+                            
+                            # BQD学习识别生成输出的边界
+                            with torch.no_grad():
+                                fake_outputs_for_bqd = safe_tensor_operation(
+                                    model_cn, batch_local_inputs, batch_local_masks,
+                                    batch_global_inputs, batch_global_masks
+                                )    
+                            
+                            # 第一次backward
+                            
+                            _, bqd_loss_out, _ = model_bqd(
+                                fake_outputs_for_bqd,
+                                batch_local_masks,  # detach阻止梯度传播到补全网络
+                            )
+                            bqd_loss_out_scaled = (
+                                bqd_loss_out / accumulation_steps * 2
+                            )
+                            scaler_bqd_p3.scale(bqd_loss_out_scaled).backward(
+                                retain_graph=True
+                            )
+                           
+                            # 第二次backward
+                            bqd_outputs_in, bqd_loss_in, _ = model_bqd(
+                                batch_local_inputs, batch_local_masks
+                            )             
+                            bqd_loss_in_scaled = bqd_loss_in / accumulation_steps * 2
+                            scaler_bqd_p3.scale(bqd_loss_in_scaled).backward(
+                                retain_graph=True
+                            )
+                            av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled)/2
+                            # 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
+
+                            ''' # 冻结BQD参数，避免对抗损失影响BQD训练
+                            for param in model_bqd.parameters():
+                                param.requires_grad = False
+                            for param in model_cn.parameters():
+                                param.requires_grad = True
+
+                            # 重新计算BQD输出，但不detach，让梯度流向补全网络
+                            # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
+                            _, _, bqd_loss_mask_adversarial = model_bqd(
+                                fake_outputs, batch_local_masks
+                            )
+                            # 对抗损失：让补全网络生成的结果能欺骗BQD网络
+                            adversarial_loss = bqd_loss_mask_adversarial/ accumulation_steps * 2  # 降低权重避免过强
+                            scaler_cn.scale(adversarial_loss).backward()  '''
 
                             # ==================== 训练生成器 ====================
                             for param in model_cd.parameters():
+                                param.requires_grad = False
+                            for param in model_bqd.parameters():
                                 param.requires_grad = False
                             for param in model_cn.parameters():
                                 param.requires_grad = True
@@ -3367,56 +3423,18 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 loss_cn_adv = F.binary_cross_entropy_with_logits(
                                     fake_predictions, real_labels
                                 )
+                                # BQD损失
+                                _, _, bloss = model_bqd(fake_outputs, batch_local_masks)
 
                                 # 组合生成器损失并标准化
                                 loss_cn = (
-                                    loss_cn_recon + alpha_g * loss_cn_adv
+                                    loss_cn_recon + alpha_g * loss_cn_adv + bloss*0.5
                                 ) / accumulation_steps
 
                             # 生成器反向传播
                             scaler_cn.scale(loss_cn).backward(retain_graph=True)
                             
-                            # =================== 训练BQD =======================
-                            for param in model_bqd.parameters():
-                                param.requires_grad = True
-                            # 第一次backward
-                            for param in model_cn.parameters():
-                                param.requires_grad = False
-                            _, bqd_loss_out, _ = model_bqd(
-                                fake_outputs.detach(),
-                                batch_local_masks,  # detach阻止梯度传播到补全网络
-                            )
-                            bqd_loss_out_scaled = (
-                                bqd_loss_out / accumulation_steps * 2
-                            )
-                            scaler_bqd_p3.scale(bqd_loss_out_scaled).backward(
-                                retain_graph=True
-                            )
-                            for param in model_cn.parameters():
-                                param.requires_grad = True
-                            # 第二次backward
-                            bqd_outputs_in, bqd_loss_in, _ = model_bqd(
-                                batch_local_inputs, batch_local_masks
-                            )             
-                            bqd_loss_in_scaled = bqd_loss_in / accumulation_steps * 2
-                            scaler_bqd_p3.scale(bqd_loss_in_scaled).backward(
-                                retain_graph=True
-                            )
-                            
-                            # 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
-
-                            # 冻结BQD参数，避免对抗损失影响BQD训练
-                            for param in model_bqd.parameters():
-                                param.requires_grad = False
-
-                            # 重新计算BQD输出，但不detach，让梯度流向补全网络
-                            # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
-                            _, _, bqd_loss_mask_adversarial = model_bqd(
-                                fake_outputs, batch_local_masks
-                            )
-                            # 对抗损失：让补全网络生成的结果能欺骗BQD网络
-                            adversarial_loss = bqd_loss_mask_adversarial/ accumulation_steps * 2  # 降低权重避免过强
-                            scaler_cn.scale(adversarial_loss).backward()      
+                                
 
                             # ==================== 累积梯度更新 ====================
                             accumulated_step += 1
@@ -3503,7 +3521,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     if "phase3_gen" in loss_windows:
                                         viz.line(
                                             Y=torch.tensor(
-                                                [[loss_cn.item() * accumulation_steps, bqd_loss_in_scaled.item() * accumulation_steps, bqd_loss_mask_adversarial.item() * accumulation_steps]]
+                                                [[loss_cn.item() * accumulation_steps, av_bqd_loss.item() * accumulation_steps, bloss.item() * accumulation_steps]]
                                             ),
                                             X=torch.tensor([step]),
                                             win=loss_windows["phase3_gen"],
@@ -3656,13 +3674,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     metadata,
                                                 )
                                             )
+                                            bqd_in,_,_ = model_bqd(test_local_inputs, test_local_masks)
+                                            bqd_out,_,_= model_bqd(test_output, test_local_masks)
 
                                             visualize_results(
                                                 test_local_targets,
                                                 test_local_inputs,
                                                 test_output,
-                                                None,
-                                                None,
+                                                bqd_in,
+                                                bqd_out,
                                                 completed,
                                                 step,
                                                 "phase_3",
@@ -3673,6 +3693,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 completed,
                                                 completed_mask,
                                                 test_data,
+                                                bqd_in,
+                                                bqd_out
                                             )
                                         except Exception as e:
                                             print(f"可视化失败: {e}")
@@ -3865,7 +3887,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"",
+        default=r"E:\KingCrimson Dataset\Simulate\data0\results20pre\latest_checkpoint.pth",
         help="resume from checkpoint path",
     )
     parser.add_argument(
@@ -3878,7 +3900,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
-    parser.add_argument("--batch", type=int, default=4, help="batch size for training")
+    parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
         "--phase", type=int, default=3, help="training phase to start from (1, 2, or 3)"
     )
