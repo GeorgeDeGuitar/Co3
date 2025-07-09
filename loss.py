@@ -889,7 +889,7 @@ def completion_network_loss(
 ):
     """Calculate the completion network loss."""
     nw = 0.2# 0.3
-    bw = 0.2# 0.5 #completed，大部分在无法改变的global
+    bw = 0# 0.2# 0.5 #completed，大部分在无法改变的global
     ew = 0# 0.2
     cw = 1
     cg=0

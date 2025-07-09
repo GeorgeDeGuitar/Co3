@@ -19,7 +19,7 @@ from loss import completion_network_loss
 import torch.nn.functional as F
 
 # Import your models
-from models_ori import ContextDiscriminator  # models626
+from models_simp import ContextDiscriminator  # models626
 from modelcn3 import CompletionNetwork
 
 # Import your custom dataset
@@ -433,8 +433,8 @@ def load_checkpoint(
         if opt_bqd and checkpoint.get("opt_bqd_state_dict"):
             opt_bqd.load_state_dict(checkpoint["opt_bqd_state_dict"])
         
-        '''# 恢复随机数状态
-        if "torch_rng_state" in checkpoint:
+        # 恢复随机数状态
+        '''if "torch_rng_state" in checkpoint:
             torch.set_rng_state(checkpoint["torch_rng_state"])
         if "numpy_rng_state" in checkpoint:
             np.random.set_state(checkpoint["numpy_rng_state"])
@@ -887,7 +887,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             print(f"Visdom初始化失败: {e}")
             viz = None
 
-
+        
         # =================================================
         # Preparation
         # =================================================
@@ -1390,7 +1390,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CD预训练权重失败: {e}")
 
-                # Create windows for the different phases and metrics
+        # Create windows for the different phases and metrics
         loss_windows = {}
         if viz is not None:
             try:
@@ -1484,6 +1484,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 print(f"创建Visdom窗口失败: {e}")
                 traceback.print_exc()  # 打印详细的错误堆栈信息
                 loss_windows = {}
+
 
         # 在批次大小配置部分
         if use_multi_gpu:
@@ -2082,53 +2083,32 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 metadata,
                             ) = batch_data
 
-                            # Forward pass
-                            outputs = safe_tensor_operation(
-                                model_cn,
-                                batch_local_inputs,
-                                batch_local_masks,
-                                batch_global_inputs,
-                                batch_global_masks,
-                            )
-
-                            completed, completed_mask, pos = merge_local_to_global(
-                                outputs,
-                                batch_global_inputs,
-                                batch_global_masks,
-                                metadata,
-                            )
-
-                            # Calculate loss
-                            loss = (
-                                completion_network_loss(
-                                    outputs,
-                                    batch_local_targets,
-                                    batch_local_masks,
-                                    batch_global_targets,
-                                    completed,
-                                    completed_mask,
-                                    pos,
-                                )
-                                / accumulation_steps
-                            )
-
                             # ==================== 四次独立的backward ====================
                             # 开始训练时可能不成功，不成功则重试
 
                             if True:
                                 #### 第1次backward - BQD网络学习识别生成输出边缘 ####
 
-                                if outputs is not None:
-                                    if step > 2000:
-                                        bqd_outputs_out, bqd_loss_out, _ = model_bqd(
-                                            outputs.detach(),
-                                            batch_local_masks,  # detach阻止梯度传播到补全网络
+                                if True:
+                                    # if step > 2000:
+                                    for param in model_cn.parameters():
+                                        param.requires_grad = False
+                                    for param in model_bqd.parameters():
+                                        param.requires_grad = True
+                                    # Forward pass
+                                    with torch.no_grad():
+                                        outputs = safe_tensor_operation(
+                                            model_cn,
+                                            batch_local_inputs,
+                                            batch_local_masks,
+                                            batch_global_inputs,
+                                            batch_global_masks,
                                         )
-                                    else:
-                                        bqd_outputs_out, bqd_loss_out, _ = model_bqd(
-                                            outputs,
-                                            batch_local_masks,  # detach阻止梯度传播到补全网络
-                                        )
+                                    bqd_outputs_out, bqd_loss_out, _ = model_bqd(
+                                        outputs.detach(),
+                                        batch_local_masks,  # detach阻止梯度传播到补全网络
+                                    )
+
                                     bqd_loss_out = ensure_scalar_loss(bqd_loss_out)
                                     bqd_loss_out_scaled = (
                                         bqd_loss_out / accumulation_steps * 2
@@ -2144,6 +2124,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     bqd_loss_out = torch.tensor(0.0, device=device)
 
                                 #### 第2次backward - BQD网络学习识别原始输入边缘 ####
+
                                 bqd_outputs_in, bqd_loss_in, _ = model_bqd(
                                     batch_local_inputs, batch_local_masks
                                 )
@@ -2151,17 +2132,45 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 bqd_loss_in_scaled = (
                                     bqd_loss_in / accumulation_steps * 2
                                 )
-                                scaler_bqd.scale(bqd_loss_in_scaled).backward(
-                                    retain_graph=True
+                                scaler_bqd.scale(bqd_loss_in_scaled).backward()                              
+
+                                #### 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
+                            if True:
+                                # 临时冻结BQD参数，避免对抗损失影响BQD训练
+                                for param in model_bqd.parameters():
+                                    param.requires_grad = False
+                                for param in model_cn.parameters():
+                                    param.requires_grad = True
+                                # Forward pass
+                                outputs = safe_tensor_operation(
+                                    model_cn,
+                                    batch_local_inputs,
+                                    batch_local_masks,
+                                    batch_global_inputs,
+                                    batch_global_masks,
                                 )
 
-                            #### 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
-                            if True:
-                                if outputs is not None:
-                                    # 临时冻结BQD参数，避免对抗损失影响BQD训练
-                                    for param in model_bqd.parameters():
-                                        param.requires_grad = False
+                                completed, completed_mask, pos = merge_local_to_global(
+                                    outputs,
+                                    batch_global_inputs,
+                                    batch_global_masks,
+                                    metadata,
+                                )
 
+                                # Calculate loss
+                                loss = (
+                                    completion_network_loss(
+                                        outputs,
+                                        batch_local_targets,
+                                        batch_local_masks,
+                                        batch_global_targets,
+                                        completed,
+                                        completed_mask,
+                                        pos,
+                                    )
+                                    / accumulation_steps
+                                )
+                                if outputs is not None:
                                     # 重新计算BQD输出，但不detach，让梯度流向补全网络
                                     # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
                                     _, _, bqd_loss_mask_adversarial = model_bqd(
@@ -2172,21 +2181,16 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     adversarial_loss = (
                                         bqd_loss_mask_adversarial / accumulation_steps
                                     )  # 降低权重避免过强
-                                    scaler.scale(adversarial_loss).backward(
-                                        retain_graph=True
-                                    )
 
-                                    # 恢复BQD参数梯度，为后续优化步骤准备
-                                    for param in model_bqd.parameters():
-                                        param.requires_grad = True
                                 else:
                                     print(
                                         "Warning: outputs is None, skipping adversarial loss"
                                     )
                                     adversarial_loss = torch.tensor(0.0, device=device)
-                            if True:
-                                #### 第4次backward - 补全网络的主要损失 ####
-                                scaler.scale(loss).backward()
+                            
+                                #### 第3次backward - 补全网络的主要损失 ####
+                                # print(f"loss:{loss}, bqdloss:{adversarial_loss}")
+                                scaler.scale(loss + adversarial_loss*5).backward()
 
                             accumulated_step += 1
 
@@ -2486,7 +2490,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                                             # 清理变量
                                             del test_output, completed
-                                            del val_data
+                                   
                                             del (
                                                 val_batch,
                                                 val_local_inputs,
@@ -2515,6 +2519,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                         except Exception as e:
                             print(f"训练批次处理失败: {e}")
+                            traceback.print_exc()  # 打印详细的错误堆栈信息
                             cleanup_memory()
                             continue
 
@@ -3728,8 +3733,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 _, _, bloss = model_bqd(fake_outputs, batch_local_masks)
                                 # 确保loss是标量 - 新增这行
                                 bloss = ensure_scalar_loss(bloss) 
-                                if step>steps_3 * 3/5:
-                                    bloss *= 5
 
                                 # 组合生成器损失并标准化
                                 loss_cn = (
@@ -4208,22 +4211,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"E:\KingCrimson Dataset\Simulate\data0\results20pre\latest_checkpoint.pth",
+        default=r"e:\KingCrimson Dataset\Simulate\data0\result20\latest_checkpoint.pth",
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="results20pre", help="directory to save results"
+        "--dir", type=str, default="result20", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEMpre20", help="visdom environment name"
+        "--envi", type=str, default="DEMo20", help="visdom environment name"
     )
-    parser.add_argument("--cuda", type=str, default="cuda:0", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=3, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():
