@@ -2996,7 +2996,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )  # 标签平滑
 
                                 # 训练判别器处理假样本
-                                fake_predictions, fake_lf, fake_gf, fake_bf = (
+                                fake_predictions, fake_lf, fake_gf = (
                                     safe_tensor_operation(
                                         model_cd,
                                         fake_outputs_noisy,
@@ -3007,7 +3007,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )
 
                                 # 训练判别器处理真实样本
-                                real_predictions, real_lf, real_gf, real_bf = (
+                                real_predictions, real_lf, real_gf = (
                                     safe_tensor_operation(
                                         model_cd,
                                         batch_local_targets_noisy,
@@ -3031,10 +3031,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     feature_contrastive_loss(
                                         real_lf,
                                         real_gf,
-                                        real_bf,
                                         fake_lf,
                                         fake_gf,
-                                        fake_bf,
                                     )
                                     * fm_weight
                                 )

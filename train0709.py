@@ -2083,10 +2083,10 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 metadata,
                             ) = batch_data
 
-                            # ==================== 四次独立的backward ====================
+                            # ==================== 3次独立的backward ====================
                             # 开始训练时可能不成功，不成功则重试
 
-                            if True:
+                            if False:
                                 #### 第1次backward - BQD网络学习识别生成输出边缘 ####
 
                                 if True:
@@ -2170,27 +2170,12 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     )
                                     / accumulation_steps
                                 )
-                                if outputs is not None:
-                                    # 重新计算BQD输出，但不detach，让梯度流向补全网络
-                                    # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
-                                    _, _, bqd_loss_mask_adversarial = model_bqd(
-                                        outputs, batch_local_masks
-                                    )
-                                    bqd_loss_mask_adversarial = ensure_scalar_loss(bqd_loss_mask_adversarial)
-                                    # 对抗损失：让补全网络生成的结果能欺骗BQD网络
-                                    adversarial_loss = (
-                                        bqd_loss_mask_adversarial / accumulation_steps
-                                    )  # 降低权重避免过强
 
-                                else:
-                                    print(
-                                        "Warning: outputs is None, skipping adversarial loss"
-                                    )
-                                    adversarial_loss = torch.tensor(0.0, device=device)
                             
                                 #### 第3次backward - 补全网络的主要损失 ####
                                 # print(f"loss:{loss}, bqdloss:{adversarial_loss}")
-                                scaler.scale(loss + adversarial_loss*5).backward()
+                                # scaler.scale(loss + adversarial_loss*5).backward()
+                                scaler.scale(loss).backward()
 
                             accumulated_step += 1
 
@@ -2207,21 +2192,13 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     scaler.update()
                                     opt_cn_p1.zero_grad(set_to_none=True)
 
-                                if True:
-                                    scaler_bqd.unscale_(opt_bqd)
-                                    torch.nn.utils.clip_grad_norm_(
-                                        model_bqd.parameters(), max_norm=1.0
-                                    )
-                                    scaler_bqd.step(opt_bqd)
-                                    scaler_bqd.update()
-                                    opt_bqd.zero_grad(set_to_none=True)
 
                             # Update Visdom plot for training loss
                             if viz is not None and "phase1_train" in loss_windows:
                                 try:
                                     y0 = loss.item() if loss.item() < 1000 else -1
                                     y = torch.tensor(
-                                        [y0, bqd_loss_in.item(), bqd_loss_out.item()]
+                                        [y0, torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)]
                                     ).float()
                                     viz.line(
                                         Y=y.unsqueeze(0),  # shape (1, 3)
@@ -2240,7 +2217,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     phase1_schedulers = None  # Phase 1通常不使用调度器
                                     phase1_scalers = {
                                         "cn": scaler,        # Phase 1的CN缩放器
-                                        "bqd": scaler_bqd,   # Phase 1的BQD缩放器
+                                        "bqd": None,   # Phase 1的BQD缩放器
                                     }
                                     
                                     save_checkpoint(
@@ -2281,10 +2258,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 completed_mask,
                                 pos,
                                 loss,
-                                bqd_outputs_in,
-                                bqd_loss_in,
-                                bqd_outputs_out,
-                                bqd_loss_out,
                             )
                             del batch_data
 
@@ -4211,16 +4184,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"e:\KingCrimson Dataset\Simulate\data0\result20\latest_checkpoint.pth",
+        default=r"",
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="result20", help="directory to save results"
+        "--dir", type=str, default="results21", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEMo20", help="visdom environment name"
+        "--envi", type=str, default="DEM21", help="visdom environment name"
     )
-    parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
