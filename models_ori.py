@@ -451,8 +451,32 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
         
         # 限制值范围，防止极值
         slope = torch.clamp(slope, min=0.0, max=10.0)
+
+        # 归一化坡度
+        slope_min = slope.min()
+        slope_max = slope.max()
         
-        # 返回简化的地形特征：原始高程 + 坡度
+        # 避免除零错误
+        if slope_max - slope_min > 1e-8:
+            # 归一化到[0, 1]
+            slope = (slope - slope_min) / (slope_max - slope_min)
+        else:
+            # 如果范围太小，直接设为0.5
+            slope = torch.full_like(slope, 0.5)
+
+        # 归一化输入
+        x_min = x.min()
+        x_max = x.max()
+        
+        # 避免除零错误
+        if x_max - x_min > 1e-8:
+            # 归一化到[0, 1]
+            x = (x - x_min) / (x_max - x_min)
+        else:
+            # 如果范围太小，直接设为0.5
+            x = torch.full_like(x, 0.5)
+        
+        # 返回简化的地形特征：高程 + 坡度
         features = torch.cat([x, slope], dim=1)
         features = F.dropout(features, p=0.1, training=self.training)
         

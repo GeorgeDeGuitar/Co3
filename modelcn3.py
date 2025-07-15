@@ -657,6 +657,20 @@ class CompletionNetwork(nn.Module):
         else:
             # 不使用插值，保持原始输入
             local_input_processed = local_input
+        
+        # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
+        global_min = global_input.min()
+        global_max = global_input.max()
+        
+        # 避免除零错误
+        if global_max - global_min > 1e-8:
+            # 归一化到[0, 1]
+            global_input = (global_input - global_min) / (global_max - global_min)
+            local_input = (local_input - global_min) / (global_max - global_min)
+        else:
+            # 如果范围太小，直接设为0.5
+            global_input = torch.full_like(global_input, 0.5)
+            local_input = torch.full_like(local_input, 0.5)
 
         # Apply early attention
         local_input_attended = self.early_local_attention(local_input, local_mask)
@@ -746,7 +760,7 @@ class CompletionNetwork(nn.Module):
 
         # Smooth transition
         # blurred_mask = F.avg_pool2d(local_mask, kernel_size=3, stride=1, padding=1)
-        blurred_mask = smooth_mask_generate(local_mask, 7.0, False)
+        """blurred_mask = smooth_mask_generate(local_mask, 7.0, False)
         fused_mask = torch.max(blurred_mask, 1 - local_mask)
 
         '''known_region = local_input * local_mask
@@ -763,10 +777,16 @@ class CompletionNetwork(nn.Module):
 
         offset_output = output + offset'''
         transition_input = torch.cat([output, fused_mask], dim=1)
-        smoothed_output = self.offset_transition(transition_input)
+        smoothed_output = self.offset_transition(transition_input)"""
 
-        final_output = (local_input * local_mask + smoothed_output * (1 - local_mask))
-        return final_output
+        final_output = (local_input * local_mask + output * (1 - local_mask))
+        # 将网络输出从[0, 1]逆归一化到原始数据范围
+        if global_max - global_min > 1e-8:
+            output = final_output * (global_max - global_min) + global_min
+        else:
+            output = final_output
+
+        return output
 
 class EnhancedTerrainFeatureExtractor(nn.Module):
     """简化版地形特征提取器：仅包含坡度和原始高程"""

@@ -509,6 +509,30 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
         # 限制值范围，防止极值
         slope = torch.clamp(slope, min=0.0, max=10.0)
 
+        # 归一化坡度
+        slope_min = slope.min()
+        slope_max = slope.max()
+        
+        # 避免除零错误
+        if slope_max - slope_min > 1e-8:
+            # 归一化到[0, 1]
+            slope = (slope - slope_min) / (slope_max - slope_min)
+        else:
+            # 如果范围太小，直接设为0.5
+            slope = torch.full_like(slope, 0.5)
+
+        # 归一化输入
+        x_min = x.min()
+        x_max = x.max()
+        
+        # 避免除零错误
+        if x_max - x_min > 1e-8:
+            # 归一化到[0, 1]
+            x = (x - x_min) / (x_max - x_min)
+        else:
+            # 如果范围太小，直接设为0.5
+            x = torch.full_like(x, 0.5)
+
         # 返回简化的地形特征：原始高程 + 坡度
         features = torch.cat([x, slope], dim=1)
         features = F.dropout(features, p=0.1, training=self.training)
@@ -659,7 +683,7 @@ class GlobalDiscriminator(nn.Module):
 
         # 第一层卷积 - 使用门控卷积处理掩码
         self.conv1 = DisGatedConv2d(
-            enhanced_channels - 1, 64, kernel_size=4, stride=2, padding=1
+            enhanced_channels, 64, kernel_size=4, stride=2, padding=1
         )
         self.bn1 = nn.BatchNorm2d(64)
         self.act1 = nn.LeakyReLU(0.2, inplace=True)
@@ -729,7 +753,7 @@ class GlobalDiscriminator(nn.Module):
 
         # 第一层卷积，应用门控卷积
         #### x = self.conv1(x, current_mask)
-        x = self.conv1(torch.cat([globalin, mask], dim=1), current_mask)
+        x = self.conv1(x)
         x = self.bn1(x)
         x = self.act1(x)
         # 更新掩码尺寸
@@ -805,7 +829,7 @@ class LocalDiscriminator(nn.Module):
 
         # 第一层卷积 - 使用谱归一化
         self.conv1 = spectral_norm(
-            nn.Conv2d(terrain_channels - 1, 64, kernel_size=4, stride=2, padding=1)
+            nn.Conv2d(terrain_channels, 64, kernel_size=4, stride=2, padding=1)
         )
         self.bn1 = nn.BatchNorm2d(64)
         self.act1 = nn.LeakyReLU(0.2, inplace=True)
@@ -860,7 +884,7 @@ class LocalDiscriminator(nn.Module):
 
         # 第一层卷积
         ##################### x = self.act1(self.bn1(self.conv1(x)))
-        x = self.act1(self.bn1(self.conv1(local)))
+        x = self.act1(self.bn1(self.conv1(x)))
 
         # 第二层卷积
         x = self.act2(self.bn2(self.conv2(x)))

@@ -846,7 +846,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
         # Training parameters
         steps_1 = 150000  # Phase 1 training steps
-        steps_2 = 50000  # Phase 2 training steps
+        steps_2 = 80000  # Phase 2 training steps
         steps_3 = 200000  # Phase 3 training steps
 
         snaperiod_1 = 500  # How often to save snapshots in phase 1
@@ -1325,7 +1325,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
             if phase == 2:
                 # Load pre-trained weights if available
-                pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results20pre\phase1\model_cn_best"
+                pretrained_weights_path = r"e:\KingCrimson Dataset\Simulate\data0\results22\phase_1\model_cn_best"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(
@@ -2083,7 +2083,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 metadata,
                             ) = batch_data
 
-                            # ==================== 四次独立的backward ====================
+                            # ==================== 三次独立的backward ====================
                             # 开始训练时可能不成功，不成功则重试
 
                             if True:
@@ -2190,7 +2190,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             
                                 #### 第3次backward - 补全网络的主要损失 ####
                                 # print(f"loss:{loss}, bqdloss:{adversarial_loss}")
-                                scaler.scale(loss + adversarial_loss*5).backward()
+                                scaler.scale(loss + adversarial_loss).backward()
 
                             accumulated_step += 1
 
@@ -2217,7 +2217,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     opt_bqd.zero_grad(set_to_none=True)
 
                             # Update Visdom plot for training loss
-                            if viz is not None and "phase1_train" in loss_windows:
+                            if viz is not None and "phase1_train" in loss_windows and step%100==0:
                                 try:
                                     y0 = loss.item() if loss.item() < 1000 else -1
                                     y = torch.tensor(
@@ -2492,7 +2492,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                             del test_output, completed
                                    
                                             del (
-                                                val_batch,
+                                                # val_batch,
                                                 val_local_inputs,
                                                 val_local_masks,
                                                 val_local_targets,
@@ -2589,10 +2589,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         def feature_contrastive_loss(
             real_local_feat,
             real_global_feat,
-            real_boundary_feat,
             fake_local_feat,
             fake_global_feat,
-            fake_boundary_feat,
         ):
             """特征对比损失 - 鼓励真假样本特征分离"""
 
@@ -2601,8 +2599,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             fake_local_mean = fake_local_feat.mean(0)
             real_global_mean = real_global_feat.mean(0)
             fake_global_mean = fake_global_feat.mean(0)
-            real_boudnary_mean = 0  # real_boundary_feat.mean(0)
-            fake_boundary_mean = 0  # fake_boundary_feat.mean(0)
 
             # 计算欧氏距离
             local_distance = torch.sqrt(
@@ -2854,7 +2850,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 real_data.requires_grad_(True)
 
                 # 前向传播
-                real_pred, _, _, _ = discriminator(
+                real_pred, _, _ = discriminator(
                     real_data, real_mask, real_global, real_global_mask
                 )
 
@@ -2900,7 +2896,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 scaler2 = GradScaler(enabled=True)
 
                 # 创建学习率调度器 - 只使用一种调度器
-                scheduler = CosineAnnealingLR(opt_cd, T_max=steps_2, eta_min=1e-6)
+                scheduler = CosineAnnealingLR(opt_cd_p2, T_max=steps_2, eta_min=1e-6)
 
                 # 实例噪声初始值和最小值
                 start_noise = 0.1
@@ -3071,15 +3067,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             scaler2.scale(loss).backward()
 
                             # 梯度裁剪
-                            scaler2.unscale_(opt_cd)
+                            scaler2.unscale_(opt_cd_p2)
                             torch.nn.utils.clip_grad_norm_(
                                 model_cd.parameters(), max_norm=1.0
                             )
 
                             # 更新参数
-                            scaler2.step(opt_cd)
+                            scaler2.step(opt_cd_p2)
                             scaler2.update()
-                            opt_cd.zero_grad(set_to_none=True)
+                            opt_cd_p2.zero_grad(set_to_none=True)
 
                             # 更新学习率 - 只使用调度器
                             scheduler.step()
@@ -3120,7 +3116,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             pbar.update(1)
 
                             # Visdom可视化
-                            if viz is not None:
+                            if viz is not None and step%100==0:
                                 try:
                                     if "phase2_disc" in loss_windows:
                                         viz.line(
@@ -3220,7 +3216,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     val_metadata,
                                                 )
                                                 # 获取判别器预测
-                                                val_fake_preds, _, _, _ = (
+                                                val_fake_preds, _, _ = (
                                                     safe_tensor_operation(
                                                         model_cd,
                                                         val_fake_outputs,
@@ -3230,7 +3226,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     )
                                                 )
 
-                                                val_real_preds, _, _, _ = (
+                                                val_real_preds, _, _ = (
                                                     safe_tensor_operation(
                                                         model_cd,
                                                         val_local_targets,
@@ -3347,7 +3343,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     if 'scaler_bqd' in locals() and scaler_bqd is not None:
                                         phase1_scalers['bqd'] = scaler_bqd
                                     
-                                    save_checkpoint(
+                                    '''save_checkpoint(
                                         model_cn,
                                         None,              # Phase 1不需要CD
                                         model_bqd,
@@ -3365,6 +3361,19 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         schedulers=None,   # Phase 1不使用调度器
                                         scalers=phase1_scalers if phase1_scalers else None,
                                         stability_tracker=None,
+                                    )'''
+                                    save_checkpoint(
+                                        model_cn,
+                                        model_cd,
+                                        model_bqd,
+                                        opt_cn_p1,
+                                        opt_cd_p2,
+                                        opt_bqd,
+                                        step,
+                                        2,
+                                        result_dir,
+                                        best_acc=best_acc,
+                                        cd_lr=opt_cd_p2.param_groups[0]["lr"]
                                     )
 
                                 except Exception as e:
@@ -3462,7 +3471,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     for batch in train_loader:
                         try:
                             # 减少内存检查频率
-                            if step % 500 == 0:
+                            if step % 50 == 0:
                                 check_memory_and_cleanup(threshold_gb=12.0)
 
                             # 准备数据
@@ -3811,7 +3820,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 param.requires_grad = True
 
                             # ==================== 可视化和进度更新 ====================
-                            if viz is not None:
+                            if viz is not None and step%100==0:
                                 try:
                                     if "phase3_disc" in loss_windows:
                                         viz.line(
@@ -4209,14 +4218,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"e:\KingCrimson Dataset\Simulate\data0\result20\latest_checkpoint.pth",
+        default=r"",
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="result20", help="directory to save results"
+        "--dir", type=str, default="results22p2", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEMo20", help="visdom environment name"
+        "--envi", type=str, default="DEM22", help="visdom environment name"
     )
     parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
     parser.add_argument(
@@ -4224,7 +4233,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=2, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():

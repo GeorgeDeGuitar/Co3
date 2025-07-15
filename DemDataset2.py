@@ -1037,6 +1037,25 @@ class DemDataset(Dataset):
                     ]
                 )
 
+                '''## 归一化
+                # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
+                global_min = id_target.min()
+                global_max = id_target.max()
+                
+                # 避免除零错误
+                if global_max - global_min > 1e-8:
+                    # 归一化到[0, 1]
+                    input_processed = (input_processed - global_min) / (global_max - global_min)
+                    input_target = (input_target - global_min) / (global_max - global_min)
+                    id_array = (id_array - global_min) / (global_max - global_min)
+                    id_target = (id_target - global_min) / (global_max - global_min)
+                else:
+                    # 如果范围太小，直接设为0.5
+                    global_input = torch.full_like(global_input, 0.5)
+                    local_input = torch.full_like(local_input, 0.5)
+                    id_array = torch.full_like(id_array, 0.5)
+                    id_target = torch.full_like(id_target, 0.5)'''
+
                 # 转换为张量并返回
                 return (
                     torch.tensor(input_processed, dtype=torch.float32),
@@ -1156,6 +1175,25 @@ class DemDataset(Dataset):
                     float(id_val),
                 ]
             )
+
+            '''# 归一化
+            # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
+            global_min = id_target.min()
+            global_max = id_target.max()
+            
+            # 避免除零错误
+            if global_max - global_min > 1e-8:
+                # 归一化到[0, 1]
+                processed_input = (processed_input - global_min) / (global_max - global_min)
+                input_target = (input_target - global_min) / (global_max - global_min)
+                id_array = (id_array - global_min) / (global_max - global_min)
+                id_target = (id_target - global_min) / (global_max - global_min)
+            else:
+                # 如果范围太小，直接设为0.5
+                global_input = torch.full_like(global_input, 0.5)
+                local_input = torch.full_like(local_input, 0.5)
+                id_array = torch.full_like(id_array, 0.5)
+                id_target = torch.full_like(id_target, 0.5)'''
 
             return (
                 torch.tensor(processed_input, dtype=torch.float32),
