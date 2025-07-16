@@ -1,3 +1,5 @@
+### 继承0707，将BQD的smoothloss设为全局0，同时增加对target的判别
+
 import os
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -34,7 +36,7 @@ from DemDataset2 import DemDataset, fast_collate_fn
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from BoundaryDis import BoundaryQualityDiscriminator
+from BoundaryDis2 import BoundaryQualityDiscriminator
 
 import random
 import gc
@@ -1516,6 +1518,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             outputs,
             edge_inputs=None,
             edge_outputs=None,
+            edge_targets=None,
             completed=None,
             step=0,
             phase="phase_1",
@@ -1646,12 +1649,16 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         win=f"{phase}_completed",
                     )
 
-                # ========== 增加edge_inputs和edge_outputs对比可视化（灰度图） ==========
+                # ========== 增加edge_inputs、edge_outputs和edge_targets三行对比可视化（灰度图） ==========
                 if edge_inputs is not None and edge_outputs is not None:
                     num_edge = min(num_samples, len(edge_inputs), len(edge_outputs))
+                    # 检查是否有edge_targets
+                    has_edge_targets = edge_targets is not None and len(edge_targets) >= num_edge
+                    
                     colored_edge_in = []
                     colored_edge_out = []
-
+                    colored_edge_target = []
+                    
                     # 生成灰度图像
                     for i in range(num_edge):
                         colored_edge_in.append(
@@ -1660,51 +1667,75 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         colored_edge_out.append(
                             apply_colormap(edge_outputs[i], grayscale=True)
                         )
-
-                    # 创建2行num_edge列的网格，第一行为in，第二行为out
+                        if has_edge_targets:
+                            colored_edge_target.append(
+                                apply_colormap(edge_targets[i], grayscale=True)
+                            )
+                    
+                    # 创建3行num_edge列的网格，第一行为in，第二行为out，第三行为target
                     edge_width = colored_edge_in[0].width
                     edge_height = colored_edge_in[0].height
-                    edge_grid_width = (edge_width + 5) * num_edge
-                    edge_grid_height = (edge_height + 5) * 2
-
-                    # 创建灰度图网格
-                    edge_grid_img = Image.new("L", (edge_grid_width, edge_grid_height))
-
+                    gap_size = 5
+                    gray_value = 128  # 中等灰度值 (0-255范围)
+                    
+                    edge_grid_width = (edge_width + gap_size) * num_edge
+                    edge_grid_height = (edge_height + gap_size) * (3 if has_edge_targets else 2)
+                    
+                    # 创建灰度图网格，使用灰色背景
+                    edge_grid_img = Image.new("L", (edge_grid_width, edge_grid_height), color=gray_value)
+                    
                     # 第一行: edge_inputs
                     for i in range(num_edge):
-                        x = i * (edge_width + 5)
+                        x = i * (edge_width + gap_size)
                         y = 0
                         edge_grid_img.paste(colored_edge_in[i], (x, y))
-
+                    
                     # 第二行: edge_outputs
                     for i in range(num_edge):
-                        x = i * (edge_width + 5)
-                        y = edge_height + 5
+                        x = i * (edge_width + gap_size)
+                        y = edge_height + gap_size
                         edge_grid_img.paste(colored_edge_out[i], (x, y))
-
+                    
+                    # 第三行: edge_targets (如果存在)
+                    if has_edge_targets:
+                        for i in range(num_edge):
+                            x = i * (edge_width + gap_size)
+                            y = (edge_height + gap_size) * 2
+                            edge_grid_img.paste(colored_edge_target[i], (x, y))
+                    
                     # 放大和local_inputs一样
                     edge_grid_img = edge_grid_img.resize(
                         (edge_grid_img.width * 3, edge_grid_img.height * 3),
                         Image.NEAREST,
                     )
-
+                    
                     # 转换为numpy数组时需要注意灰度图的处理
                     edge_array = np.array(edge_grid_img)
                     # 灰度图需要添加通道维度给Visdom
                     if edge_array.ndim == 2:
                         edge_array = edge_array[np.newaxis, :, :]  # 添加通道维度
-
+                    
+                    # 构建caption，根据是否有targets调整
+                    caption_text = f"{phase} edge extraction step {step}"
+                    if has_edge_targets:
+                        caption_text += " (Input/Output/Target)"
+                    else:
+                        caption_text += " (Input/Output)"
+                    
                     viz.image(
                         edge_array,
                         opts=dict(
-                            caption=f"{phase} edge extraction step {step}",
+                            caption=caption_text,
                             title=f"{phase} edge extraction",
                         ),
                         win=f"{phase}_edge_compare",
                     )
-
+                    
                     # 清理edge相关变量
-                    del colored_edge_in, colored_edge_out, edge_grid_img
+                    del colored_edge_in, colored_edge_out
+                    if has_edge_targets:
+                        del colored_edge_target
+                    del edge_grid_img
 
                 # 清理变量
                 del colored_patches, grid_img
@@ -1775,7 +1806,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             output2, loss2, loss2_mask = model_bqd(
                                 outputs, batch_local_masks
                             )
-                            loss_bqd = (loss1 + loss2) / 2
+                            output3, loss3, _ = model_bqd(batch_local_targets, torch.zeros_like(outputs))
+                            loss_bqd = (loss1 + loss2 + loss3) / 3
                             val_bqd_loss += loss_bqd.item()
                             val_loss += loss2_mask.item()
 
@@ -1815,6 +1847,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     outputs,
                     output1,
                     output2,
+                    output3,
                     completed,
                 )
 
@@ -1982,7 +2015,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 model_bqd.train()
 
                 return {
-                    "recon_loss": avg_recon_loss,
+                    "recon_loss": avg_recon_loss + bqd_loss,
                     "adv_loss": avg_adv_loss,
                     "real_acc": avg_real_acc,
                     "fake_acc": avg_fake_acc,
@@ -2132,9 +2165,20 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 bqd_loss_in_scaled = (
                                     bqd_loss_in / accumulation_steps * 2
                                 )
-                                scaler_bqd.scale(bqd_loss_in_scaled).backward()                              
+                                scaler_bqd.scale(bqd_loss_in_scaled).backward(retain_graph=True) 
 
-                                #### 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
+                                if step>5000:
+                                    #### 第3次backward - BQD网络学习识别target的全0边缘 ####
+                                    bqd_outputs_ta, bqd_loss_ta, _ = model_bqd(
+                                        batch_local_targets, torch.zeros_like(batch_local_targets)
+                                    )
+                                    bqd_loss_ta = ensure_scalar_loss(bqd_loss_ta)
+                                    bqd_loss_ta_scaled = (
+                                        bqd_loss_ta / accumulation_steps * 2
+                                    )
+                                    scaler_bqd.scale(bqd_loss_ta_scaled).backward()                              
+
+                            #### 第4次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
                             if True:
                                 # 临时冻结BQD参数，避免对抗损失影响BQD训练
                                 for param in model_bqd.parameters():
@@ -2170,7 +2214,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     )
                                     / accumulation_steps
                                 )
-                                if outputs is not None:
+                                if outputs is not None and step>10000:
                                     # 重新计算BQD输出，但不detach，让梯度流向补全网络
                                     # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
                                     _, _, bqd_loss_mask_adversarial = model_bqd(
@@ -2183,12 +2227,12 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     )  # 降低权重避免过强
 
                                 else:
-                                    print(
+                                    '''print(
                                         "Warning: outputs is None, skipping adversarial loss"
-                                    )
+                                    )'''
                                     adversarial_loss = torch.tensor(0.0, device=device)
                             
-                                #### 第3次backward - 补全网络的主要损失 ####
+                                
                                 # print(f"loss:{loss}, bqdloss:{adversarial_loss}")
                                 scaler.scale(loss + adversarial_loss).backward()
 
@@ -2300,6 +2344,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         test_output,
                                         val_in,
                                         val_out,
+                                        val_target,
                                         completed,
                                     ) = validate(
                                         model_cn, model_bqd, val_subset_loader, device
@@ -2397,6 +2442,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 test_output,
                                                 val_in,
                                                 val_out,
+                                                val_target,
                                                 completed,
                                                 step,
                                                 "phase_1",
@@ -3656,8 +3702,21 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             scaler_bqd_p3.scale(bqd_loss_in_scaled).backward(
                                 retain_graph=True
                             )
-                            av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled) / 2
-                            # 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
+                            
+                            
+                            # 第3次backward
+                            bqd_outputs_ta, bqd_loss_ta, _ = model_bqd(
+                                batch_local_targets, torch.zeros_like(batch_local_targets)
+                            )
+                            bqd_loss_ta = ensure_scalar_loss(bqd_loss_ta)
+                            bqd_loss_ta_scaled = (
+                                bqd_loss_ta / accumulation_steps * 2
+                            )
+                            scaler_bqd.scale(bqd_loss_ta_scaled).backward() 
+
+                            av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled + bqd_loss_ta_scaled) / 3
+
+                            # - 补全网络的对抗损失（让生成结果欺骗BQD） ####
 
                             """ # 冻结BQD参数，避免对抗损失影响BQD训练
                             for param in model_bqd.parameters():
@@ -4012,6 +4071,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                             bqd_out, _, _ = model_bqd(
                                                 test_output, test_local_masks
                                             )
+                                            bqd_target, _, _ = model_bqd(
+                                                test_local_targets, test_local_masks
+                                            )
 
                                             visualize_results(
                                                 test_local_targets,
@@ -4019,6 +4081,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 test_output,
                                                 bqd_in,
                                                 bqd_out,
+                                                bqd_target,
                                                 completed,
                                                 step,
                                                 "phase_3",
@@ -4220,22 +4283,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"e:\KingCrimson Dataset\Simulate\data0\results22\checkpoint_phase1_step159500.pth",
+        default=r"",
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="results22", help="directory to save results"
+        "--dir", type=str, default="results23", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEM22", help="visdom environment name"
+        "--envi", type=str, default="DEM23", help="visdom environment name"
     )
-    parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:0", help="CUDA device to use")
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=2, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():

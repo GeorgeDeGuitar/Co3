@@ -745,8 +745,8 @@ class GlobalDiscriminator(nn.Module):
         x = torch.cat([terrain_features, mask], dim=1)
 
         # 应用空间注意力，重点关注有效区域
-        """attention = self.spatial_attention(x)
-        x = x * attention"""
+        attention = self.spatial_attention(x)
+        x = x * attention
 
         # 创建下采样掩码进行跟踪
         current_mask = mask
