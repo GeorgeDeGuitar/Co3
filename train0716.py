@@ -1,3 +1,5 @@
+### 继承0707，将BQD的smoothloss设为全局0，同时增加对target的判别
+
 import os
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -19,12 +21,12 @@ from loss import completion_network_loss
 import torch.nn.functional as F
 
 # Import your models
-from models_simp import ContextDiscriminator  # models626
+from models_ori import ContextDiscriminator  # models626
 from modelcn4 import CompletionNetwork
 
 # Import your custom dataset
 ## from DemDataset1 import DemDataset
-from DemDataset2 import DemDataset, fast_collate_fn
+from DemDataset3 import DemDataset, fast_collate_fn
 
 # from DEMData import DEMData
 
@@ -34,7 +36,7 @@ from DemDataset2 import DemDataset, fast_collate_fn
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from BoundaryDis import BoundaryQualityDiscriminator
+from BoundaryDis2 import BoundaryQualityDiscriminator
 
 import random
 import gc
@@ -838,9 +840,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         else:
             json_dir = r"E:\KingCrimson Dataset\Simulate\data0\json"  # 局部json
         array_dir = (
-            r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"  # 全局array
+            r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\array"  # 全局array
         )
-        mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"  # 全局mask
+        mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\mask"  # 全局mask
         target_dir = r"E:\KingCrimson Dataset\Simulate\data0\groundtruthstatus\statusarray"  # 全局target
         result_dir = rf"E:\KingCrimson Dataset\Simulate\data0\{dir}"  # 结果保存路径
 
@@ -1065,6 +1067,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             model_bqd = BoundaryQualityDiscriminator(
                 input_channels=1, input_size=33
             ).to(device)
+            model_cn = model_cn.float()
+            model_cd = model_cd.float()
+            model_bqd = model_bqd.float()
 
             # 包装为多GPU模型
             if use_multi_gpu:
@@ -1516,6 +1521,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             outputs,
             edge_inputs=None,
             edge_outputs=None,
+            edge_targets=None,
             completed=None,
             step=0,
             phase="phase_1",
@@ -1646,12 +1652,16 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         win=f"{phase}_completed",
                     )
 
-                # ========== 增加edge_inputs和edge_outputs对比可视化（灰度图） ==========
+                # ========== 增加edge_inputs、edge_outputs和edge_targets三行对比可视化（灰度图） ==========
                 if edge_inputs is not None and edge_outputs is not None:
                     num_edge = min(num_samples, len(edge_inputs), len(edge_outputs))
+                    # 检查是否有edge_targets
+                    has_edge_targets = edge_targets is not None and len(edge_targets) >= num_edge
+                    
                     colored_edge_in = []
                     colored_edge_out = []
-
+                    colored_edge_target = []
+                    
                     # 生成灰度图像
                     for i in range(num_edge):
                         colored_edge_in.append(
@@ -1660,51 +1670,75 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         colored_edge_out.append(
                             apply_colormap(edge_outputs[i], grayscale=True)
                         )
-
-                    # 创建2行num_edge列的网格，第一行为in，第二行为out
+                        if has_edge_targets:
+                            colored_edge_target.append(
+                                apply_colormap(edge_targets[i], grayscale=True)
+                            )
+                    
+                    # 创建3行num_edge列的网格，第一行为in，第二行为out，第三行为target
                     edge_width = colored_edge_in[0].width
                     edge_height = colored_edge_in[0].height
-                    edge_grid_width = (edge_width + 5) * num_edge
-                    edge_grid_height = (edge_height + 5) * 2
-
-                    # 创建灰度图网格
-                    edge_grid_img = Image.new("L", (edge_grid_width, edge_grid_height))
-
+                    gap_size = 5
+                    gray_value = 128  # 中等灰度值 (0-255范围)
+                    
+                    edge_grid_width = (edge_width + gap_size) * num_edge
+                    edge_grid_height = (edge_height + gap_size) * (3 if has_edge_targets else 2)
+                    
+                    # 创建灰度图网格，使用灰色背景
+                    edge_grid_img = Image.new("L", (edge_grid_width, edge_grid_height), color=gray_value)
+                    
                     # 第一行: edge_inputs
                     for i in range(num_edge):
-                        x = i * (edge_width + 5)
+                        x = i * (edge_width + gap_size)
                         y = 0
-                        edge_grid_img.paste(colored_edge_in[i], (x, y))
-
+                        edge_grid_img.paste(colored_edge_target[i], (x, y))
+                    
                     # 第二行: edge_outputs
                     for i in range(num_edge):
-                        x = i * (edge_width + 5)
-                        y = edge_height + 5
-                        edge_grid_img.paste(colored_edge_out[i], (x, y))
-
+                        x = i * (edge_width + gap_size)
+                        y = edge_height + gap_size
+                        edge_grid_img.paste(colored_edge_in[i], (x, y))
+                    
+                    # 第三行: edge_targets (如果存在)
+                    if has_edge_targets:
+                        for i in range(num_edge):
+                            x = i * (edge_width + gap_size)
+                            y = (edge_height + gap_size) * 2
+                            edge_grid_img.paste(colored_edge_out[i], (x, y))
+                    
                     # 放大和local_inputs一样
                     edge_grid_img = edge_grid_img.resize(
                         (edge_grid_img.width * 3, edge_grid_img.height * 3),
                         Image.NEAREST,
                     )
-
+                    
                     # 转换为numpy数组时需要注意灰度图的处理
                     edge_array = np.array(edge_grid_img)
                     # 灰度图需要添加通道维度给Visdom
                     if edge_array.ndim == 2:
                         edge_array = edge_array[np.newaxis, :, :]  # 添加通道维度
-
+                    
+                    # 构建caption，根据是否有targets调整
+                    caption_text = f"{phase} edge extraction step {step}"
+                    if has_edge_targets:
+                        caption_text += " (Input/Output/Target)"
+                    else:
+                        caption_text += " (Input/Output)"
+                    
                     viz.image(
                         edge_array,
                         opts=dict(
-                            caption=f"{phase} edge extraction step {step}",
+                            caption=caption_text,
                             title=f"{phase} edge extraction",
                         ),
                         win=f"{phase}_edge_compare",
                     )
-
+                    
                     # 清理edge相关变量
-                    del colored_edge_in, colored_edge_out, edge_grid_img
+                    del colored_edge_in, colored_edge_out
+                    if has_edge_targets:
+                        del colored_edge_target
+                    del edge_grid_img
 
                 # 清理变量
                 del colored_patches, grid_img
@@ -1775,6 +1809,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             output2, loss2, loss2_mask = model_bqd(
                                 outputs, batch_local_masks
                             )
+                            output3, _, _ = model_bqd(batch_local_targets, torch.zeros_like(outputs))
                             loss_bqd = (loss1 + loss2) / 2
                             val_bqd_loss += loss_bqd.item()
                             val_loss += loss2_mask.item()
@@ -1815,6 +1850,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     outputs,
                     output1,
                     output2,
+                    output3,
                     completed,
                 )
 
@@ -1969,7 +2005,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             continue
 
                 # 计算平均值
-                avg_recon_loss = recon_loss_sum / max(total_batches, 1)
+                avg_recon_loss = (recon_loss_sum + 0.1*adv_loss_sum + bqd_loss) / max(total_batches, 1)
                 avg_adv_loss = adv_loss_sum / max(total_batches, 1)
                 avg_real_acc = real_acc_sum / max(total_batches, 1)
                 avg_fake_acc = fake_acc_sum / max(total_batches, 1)
@@ -2045,8 +2081,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         # Training Phase 1: Train Completion Network only
         # =================================================
 
-        # ==================== 梯度累积配置 ====================
-
         if step_phase1 < steps_1 and phase == 1:
             print("开始/继续第1阶段训练...")
             try:
@@ -2057,7 +2091,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 scaler = GradScaler()
                 scaler_bqd = GradScaler()
                 opt_cn_p1 = Adadelta(model_cn.parameters())
-                # opt_bqd = torch.optim.Adam(model_bqd.parameters())
+                
                 if bqd_lr is not None:
                     opt_bqd.param_groups[0]["lr"] = bqd_lr
 
@@ -2083,65 +2117,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 metadata,
                             ) = batch_data
 
-                            # ==================== 三次独立的backward ====================
-                            # 开始训练时可能不成功，不成功则重试
-
-                            if True:
-                                #### 第1次backward - BQD网络学习识别生成输出边缘 ####
-
-                                if True:
-                                    # if step > 2000:
-                                    for param in model_cn.parameters():
-                                        param.requires_grad = False
-                                    for param in model_bqd.parameters():
-                                        param.requires_grad = True
-                                    # Forward pass
-                                    with torch.no_grad():
-                                        outputs = safe_tensor_operation(
-                                            model_cn,
-                                            batch_local_inputs,
-                                            batch_local_masks,
-                                            batch_global_inputs,
-                                            batch_global_masks,
-                                        )
-                                    bqd_outputs_out, bqd_loss_out, _ = model_bqd(
-                                        outputs.detach(),
-                                        batch_local_masks,  # detach阻止梯度传播到补全网络
-                                    )
-
-                                    bqd_loss_out = ensure_scalar_loss(bqd_loss_out)
-                                    bqd_loss_out_scaled = (
-                                        bqd_loss_out / accumulation_steps * 2
-                                    )
-                                    scaler_bqd.scale(bqd_loss_out_scaled).backward(
-                                        retain_graph=True
-                                    )
-
-                                else:
-                                    print(
-                                        "Warning: outputs is None, skipping BQD discriminator loss"
-                                    )
-                                    bqd_loss_out = torch.tensor(0.0, device=device)
-
-                                #### 第2次backward - BQD网络学习识别原始输入边缘 ####
-
-                                bqd_outputs_in, bqd_loss_in, _ = model_bqd(
-                                    batch_local_inputs, batch_local_masks
-                                )
-                                bqd_loss_in = ensure_scalar_loss(bqd_loss_in)
-                                bqd_loss_in_scaled = (
-                                    bqd_loss_in / accumulation_steps * 2
-                                )
-                                scaler_bqd.scale(bqd_loss_in_scaled).backward()                              
-
-                                #### 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
-                            if True:
-                                # 临时冻结BQD参数，避免对抗损失影响BQD训练
-                                for param in model_bqd.parameters():
-                                    param.requires_grad = False
-                                for param in model_cn.parameters():
-                                    param.requires_grad = True
-                                # Forward pass
+                            # ==================== 修复：正确实现梯度累积 ====================
+                            
+                            #### 第1次backward - BQD网络学习识别生成输出边缘 ####
+                            for param in model_cn.parameters():
+                                param.requires_grad = False
+                            for param in model_bqd.parameters():
+                                param.requires_grad = True
+                            
+                            with torch.no_grad():
                                 outputs = safe_tensor_operation(
                                     model_cn,
                                     batch_local_inputs,
@@ -2149,77 +2133,93 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     batch_global_inputs,
                                     batch_global_masks,
                                 )
-
-                                completed, completed_mask, pos = merge_local_to_global(
-                                    outputs,
-                                    batch_global_inputs,
-                                    batch_global_masks,
-                                    metadata,
-                                )
-
-                                # Calculate loss
-                                loss = (
-                                    completion_network_loss(
-                                        outputs,
-                                        batch_local_targets,
-                                        batch_local_masks,
-                                        batch_global_targets,
-                                        completed,
-                                        completed_mask,
-                                        pos,
-                                    )
-                                    / accumulation_steps
-                                )
-                                if outputs is not None:
-                                    # 重新计算BQD输出，但不detach，让梯度流向补全网络
-                                    # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
-                                    _, _, bqd_loss_mask_adversarial = model_bqd(
-                                        outputs, batch_local_masks
-                                    )
-                                    bqd_loss_mask_adversarial = ensure_scalar_loss(bqd_loss_mask_adversarial)
-                                    # 对抗损失：让补全网络生成的结果能欺骗BQD网络
-                                    adversarial_loss = (
-                                        bqd_loss_mask_adversarial / accumulation_steps
-                                    )  # 降低权重避免过强
-
-                                else:
-                                    print(
-                                        "Warning: outputs is None, skipping adversarial loss"
-                                    )
-                                    adversarial_loss = torch.tensor(0.0, device=device)
                             
-                                #### 第3次backward - 补全网络的主要损失 ####
-                                # print(f"loss:{loss}, bqdloss:{adversarial_loss}")
-                                scaler.scale(loss + adversarial_loss).backward()
+                            bqd_outputs_out, bqd_loss_out, _ = model_bqd(
+                                outputs.detach(),
+                                batch_local_masks,
+                            )
+                            bqd_loss_out = ensure_scalar_loss(bqd_loss_out)
+                            bqd_loss_out_scaled = bqd_loss_out / accumulation_steps
+                            # scaler_bqd.scale(bqd_loss_out_scaled).backward(retain_graph=True)
+                            bqd_loss_out_scaled.backward(retain_graph=True)
+
+                            #### 第2次backward - BQD网络学习识别原始输入边缘 ####
+                            bqd_outputs_in, bqd_loss_in, _ = model_bqd(
+                                batch_local_inputs, batch_local_masks
+                            )
+                            bqd_loss_in = ensure_scalar_loss(bqd_loss_in)
+                            bqd_loss_in_scaled = bqd_loss_in / accumulation_steps
+                            # scaler_bqd.scale(bqd_loss_in_scaled).backward(retain_graph=True)
+                            bqd_loss_in_scaled.backward(retain_graph=True)
+
+                            #### 第3次backward - 补全网络的重建+对抗损失 ####
+                            for param in model_bqd.parameters():
+                                param.requires_grad = False
+                            for param in model_cn.parameters():
+                                param.requires_grad = True
+
+                            # Forward pass for completion network
+                            outputs = safe_tensor_operation(
+                                model_cn,
+                                batch_local_inputs,
+                                batch_local_masks,
+                                batch_global_inputs,
+                                batch_global_masks,
+                            )
+
+                            completed, completed_mask, pos = merge_local_to_global(
+                                outputs,
+                                batch_global_inputs,
+                                batch_global_masks,
+                                metadata,
+                            )
+
+                            # 重建损失
+                            recon_loss = completion_network_loss(
+                                outputs,
+                                batch_local_targets,
+                                batch_local_masks,
+                                batch_global_targets,
+                                completed,
+                                completed_mask,
+                                pos,
+                            )
+                            
+                            # BQD对抗损失（让生成结果欺骗BQD）
+                            _, _, bqd_loss_mask_adversarial = model_bqd(
+                                outputs, batch_local_masks
+                            )
+                            bqd_loss_mask_adversarial = ensure_scalar_loss(bqd_loss_mask_adversarial)
+                            
+                            # 组合损失并应用梯度累积缩放
+                            total_cn_loss = (recon_loss + bqd_loss_mask_adversarial) / accumulation_steps
+                            # scaler.scale(total_cn_loss).backward()
+                            total_cn_loss.backward()
 
                             accumulated_step += 1
 
+                            # ==================== 修复：正确的梯度累积更新 ====================
                             if accumulated_step % accumulation_steps == 0:
-                                """scaler.step(opt_cn)
-                                scaler.update()
-                                opt_cn.zero_grad(set_to_none=True)"""
-                                if True:
-                                    scaler.unscale_(opt_cn_p1)
-                                    torch.nn.utils.clip_grad_norm_(
-                                        model_cn.parameters(), max_norm=1.0
-                                    )
-                                    scaler.step(opt_cn_p1)
-                                    scaler.update()
-                                    opt_cn_p1.zero_grad(set_to_none=True)
+                                # 更新补全网络
+                                # scaler.unscale_(opt_cn_p1)
+                                torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
+                                # scaler.step(opt_cn_p1)
+                                opt_cn_p1.step()
+                                # scaler.update()
+                                opt_cn_p1.zero_grad(set_to_none=True)
 
-                                if True:
-                                    scaler_bqd.unscale_(opt_bqd)
-                                    torch.nn.utils.clip_grad_norm_(
-                                        model_bqd.parameters(), max_norm=1.0
-                                    )
-                                    scaler_bqd.step(opt_bqd)
-                                    scaler_bqd.update()
-                                    opt_bqd.zero_grad(set_to_none=True)
+                                # 更新BQD网络
+                                # scaler_bqd.unscale_(opt_bqd)
+                                torch.nn.utils.clip_grad_norm_(model_bqd.parameters(), max_norm=1.0)
+                                # scaler_bqd.step(opt_bqd)
+                                opt_bqd.step()
+                                # scaler_bqd.update()
+                                opt_bqd.zero_grad(set_to_none=True)
 
                             # Update Visdom plot for training loss
                             if viz is not None and "phase1_train" in loss_windows and step%100==0:
                                 try:
-                                    y0 = loss.item() if loss.item() < 1000 else -1
+                                    y0 = recon_loss.item() if recon_loss.item() < 1000 else -1
                                     y = torch.tensor(
                                         [y0, bqd_loss_in.item(), bqd_loss_out.item()]
                                     ).float()
@@ -2270,7 +2270,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                             step += 1
                             pbar.set_description(
-                                f"Phase 1 | train loss: {loss.item():.5f}, adv loss: {adversarial_loss.item():.5f}"
+                                f"Phase 1 | train loss: {recon_loss.item():.5f}, adv loss: {bqd_loss_mask_adversarial.item():.5f}"
                             )
                             pbar.update(1)
 
@@ -2280,7 +2280,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 completed,
                                 completed_mask,
                                 pos,
-                                loss,
+                                recon_loss,
                                 bqd_outputs_in,
                                 bqd_loss_in,
                                 bqd_outputs_out,
@@ -2300,6 +2300,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         test_output,
                                         val_in,
                                         val_out,
+                                        val_target,
                                         completed,
                                     ) = validate(
                                         model_cn, model_bqd, val_subset_loader, device
@@ -2397,6 +2398,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 test_output,
                                                 val_in,
                                                 val_out,
+                                                val_target,
                                                 completed,
                                                 step,
                                                 "phase_1",
@@ -2931,150 +2933,152 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             ) = batch_data
 
                             # 使用自动混合精度
-                            with autocast(
+                            '''with autocast(
                                 device_type=device.type,
                                 dtype=torch.float32,
                                 enabled=True,
-                            ):
-                                # 生成假样本
-                                with torch.no_grad():
-                                    fake_outputs = safe_tensor_operation(
-                                        model_cn,
-                                        batch_local_inputs,
-                                        batch_local_masks,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                    )
-
-                                # 计算当前噪声水平 - 随着训练进展减少
-                                noise_level = max(
-                                    min_noise, start_noise * (1.0 - step / steps_2)
+                            ):'''
+                            # 生成假样本
+                            with torch.no_grad():
+                                fake_outputs = safe_tensor_operation(
+                                    model_cn,
+                                    batch_local_inputs,
+                                    batch_local_masks,
+                                    batch_global_inputs,
+                                    batch_global_masks,
                                 )
 
-                                # 应用实例噪声
-                                batch_local_targets_noisy = (
-                                    batch_local_targets
-                                    + torch.randn_like(batch_local_targets)
-                                    * noise_level
-                                )
-                                fake_outputs_noisy = (
-                                    fake_outputs
-                                    + torch.randn_like(fake_outputs) * noise_level
-                                )
+                            # 计算当前噪声水平 - 随着训练进展减少
+                            noise_level = max(
+                                min_noise, start_noise * (1.0 - step / steps_2)
+                            )
 
-                                # 嵌入假输出到全局
-                                fake_global_embedded, fake_global_mask_embedded, _ = (
-                                    merge_local_to_global(
-                                        fake_outputs_noisy,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                        metadata,
-                                    )
-                                )
+                            # 应用实例噪声
+                            batch_local_targets_noisy = (
+                                batch_local_targets
+                                + torch.randn_like(batch_local_targets)
+                                * noise_level
+                            )
+                            fake_outputs_noisy = (
+                                fake_outputs
+                                + torch.randn_like(fake_outputs) * noise_level
+                            )
 
-                                # 嵌入真实输入到全局
-                                real_global_embedded, real_global_mask_embedded, _ = (
-                                    merge_local_to_global(
-                                        batch_local_targets_noisy,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                        metadata,
-                                    )
+                            # 嵌入假输出到全局
+                            fake_global_embedded, fake_global_mask_embedded, _ = (
+                                merge_local_to_global(
+                                    fake_outputs_noisy,
+                                    batch_global_inputs,
+                                    batch_global_masks,
+                                    metadata,
                                 )
+                            )
 
-                                # 创建平滑标签
-                                batch_size = batch_local_targets.size(0)
-                                real_labels = (
-                                    torch.ones(batch_size, 1).to(device) * 0.95
-                                )  # 标签平滑
-                                fake_labels = (
-                                    torch.zeros(batch_size, 1).to(device) + 0.05
-                                )  # 标签平滑
+                            # 嵌入真实输入到全局
+                            real_global_embedded, real_global_mask_embedded, _ = (
+                                merge_local_to_global(
+                                    batch_local_targets_noisy,
+                                    batch_global_inputs,
+                                    batch_global_masks,
+                                    metadata,
+                                )
+                            )
 
-                                # 训练判别器处理假样本
-                                fake_predictions, fake_lf, fake_gf = (
-                                    safe_tensor_operation(
-                                        model_cd,
-                                        fake_outputs_noisy,
-                                        batch_local_masks,
-                                        fake_global_embedded,
-                                        fake_global_mask_embedded,
-                                    )
-                                )
+                            # 创建平滑标签
+                            batch_size = batch_local_targets.size(0)
+                            real_labels = (
+                                torch.ones(batch_size, 1).to(device) * 0.95
+                            )  # 标签平滑
+                            fake_labels = (
+                                torch.zeros(batch_size, 1).to(device) + 0.05
+                            )  # 标签平滑
 
-                                # 训练判别器处理真实样本
-                                real_predictions, real_lf, real_gf = (
-                                    safe_tensor_operation(
-                                        model_cd,
-                                        batch_local_targets_noisy,
-                                        batch_local_masks,
-                                        real_global_embedded,
-                                        real_global_mask_embedded,
-                                    )
+                            # 训练判别器处理假样本
+                            fake_predictions, fake_lf, fake_gf = (
+                                safe_tensor_operation(
+                                    model_cd,
+                                    fake_outputs_noisy,
+                                    batch_local_masks,
+                                    fake_global_embedded,
+                                    fake_global_mask_embedded,
                                 )
+                            )
 
-                                # 使用BCEWithLogitsLoss代替BCE或自定义损失
-                                loss_real = F.binary_cross_entropy_with_logits(
-                                    real_predictions, real_labels
-                                )
-                                loss_fake = F.binary_cross_entropy_with_logits(
-                                    fake_predictions, fake_labels
-                                )
-
-                                # 计算特征匹配损失
-                                fm_weight = 4
-                                fm_loss = (
-                                    feature_contrastive_loss(
-                                        real_lf,
-                                        real_gf,
-                                        fake_lf,
-                                        fake_gf,
-                                    )
-                                    * fm_weight
-                                )
-                                lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
-                                r1_loss = r1_regularization(
+                            # 训练判别器处理真实样本
+                            real_predictions, real_lf, real_gf = (
+                                safe_tensor_operation(
                                     model_cd,
                                     batch_local_targets_noisy,
                                     batch_local_masks,
                                     real_global_embedded,
                                     real_global_mask_embedded,
                                 )
+                            )
 
-                                # 使用sigmoid计算预测概率，用于准确率计算
-                                with torch.no_grad():
-                                    real_probs = torch.sigmoid(real_predictions)
-                                    fake_probs = torch.sigmoid(fake_predictions)
+                            # 使用BCEWithLogitsLoss代替BCE或自定义损失
+                            loss_real = F.binary_cross_entropy_with_logits(
+                                real_predictions, real_labels
+                            )
+                            loss_fake = F.binary_cross_entropy_with_logits(
+                                fake_predictions, fake_labels
+                            )
 
-                                    real_acc = (real_probs >= 0.5).float().mean().item()
-                                    fake_acc = (fake_probs < 0.5).float().mean().item()
-                                    avg_acc = (real_acc + fake_acc) / 2
-
-                                # 动态调整损失权重，平衡训练
-                                if real_acc < 0.1 and fake_acc > 0.9:
-                                    loss_real *= 5.0
-                                    loss_fake *= 0.5
-                                    print("loss real weight strengthened")
-                                elif fake_acc < 0.1 and real_acc > 0.9:
-                                    loss_real *= 0.5
-                                    loss_fake *= 5.0
-                                    print("loss fake weight strengthened")
-                                loss = (
-                                    loss_real + loss_fake + fm_loss + lsb_loss + r1_loss
+                            # 计算特征匹配损失
+                            fm_weight = 4
+                            fm_loss = (
+                                feature_contrastive_loss(
+                                    real_lf,
+                                    real_gf,
+                                    fake_lf,
+                                    fake_gf,
                                 )
+                                * fm_weight
+                            )
+                            lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
+                            r1_loss = r1_regularization(
+                                model_cd,
+                                batch_local_targets_noisy,
+                                batch_local_masks,
+                                real_global_embedded,
+                                real_global_mask_embedded,
+                            )
+
+                            # 使用sigmoid计算预测概率，用于准确率计算
+                            with torch.no_grad():
+                                real_probs = torch.sigmoid(real_predictions)
+                                fake_probs = torch.sigmoid(fake_predictions)
+
+                                real_acc = (real_probs >= 0.5).float().mean().item()
+                                fake_acc = (fake_probs < 0.5).float().mean().item()
+                                avg_acc = (real_acc + fake_acc) / 2
+
+                            # 动态调整损失权重，平衡训练
+                            if real_acc < 0.1 and fake_acc > 0.9:
+                                loss_real *= 5.0
+                                loss_fake *= 0.5
+                                print("loss real weight strengthened")
+                            elif fake_acc < 0.1 and real_acc > 0.9:
+                                loss_real *= 0.5
+                                loss_fake *= 5.0
+                                print("loss fake weight strengthened")
+                            loss = (
+                                loss_real + loss_fake + fm_loss + lsb_loss + r1_loss
+                            )
 
                             # 使用梯度缩放器进行反向传播
-                            scaler2.scale(loss).backward()
+                            # scaler2.scale(loss).backward()
+                            loss.backward()
 
                             # 梯度裁剪
-                            scaler2.unscale_(opt_cd_p2)
+                            # scaler2.unscale_(opt_cd_p2)
                             torch.nn.utils.clip_grad_norm_(
                                 model_cd.parameters(), max_norm=1.0
                             )
 
                             # 更新参数
-                            scaler2.step(opt_cd_p2)
-                            scaler2.update()
+                            # scaler2.step(opt_cd_p2)
+                            opt_cd_p2.step()
+                            # scaler2.update()
                             opt_cd_p2.zero_grad(set_to_none=True)
 
                             # 更新学习率 - 只使用调度器
@@ -3392,7 +3396,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                 pbar.close()
                 print(f"Phase 2 训练完成! 最佳判别器准确率: {best_acc:.4f}")
-                
+                phase = 3
 
             except Exception as e:
                 print(f"Phase 2训练过程中发生严重错误: {e}")
@@ -3402,8 +3406,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         # =================================================
         # Training Phase 3: 优化后的联合训练
         # =================================================
-        phase = 3
-        print(f"step_phase3:{step_phase3}, steps_3:{steps_3}, phase:{phase}")
+
         if step_phase3 < steps_3 and phase == 3:
             print("开始/继续第3阶段训练...")
             try:
@@ -3500,122 +3503,123 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             for param in model_cd.parameters():
                                 param.requires_grad = True
 
-                            with autocast(
+                            '''with autocast(
                                 device_type=device.type,
                                 dtype=torch.float32,
                                 enabled=True,
-                            ):
-                                # 生成假样本
-                                with torch.no_grad():
-                                    fake_outputs = safe_tensor_operation(
-                                        model_cn,
-                                        batch_local_inputs,
-                                        batch_local_masks,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                    )
-
-                                # 应用适度噪声
-                                batch_local_targets_noisy = (
-                                    batch_local_targets
-                                    + torch.randn_like(batch_local_targets)
-                                    * noise_level
-                                )
-                                fake_outputs_noisy = (
-                                    fake_outputs
-                                    + torch.randn_like(fake_outputs) * noise_level
+                            ):'''
+                            # 生成假样本
+                            with torch.no_grad():
+                                fake_outputs = safe_tensor_operation(
+                                    model_cn,
+                                    batch_local_inputs,
+                                    batch_local_masks,
+                                    batch_global_inputs,
+                                    batch_global_masks,
                                 )
 
-                                # 嵌入到全局
-                                fake_global_embedded, fake_global_mask_embedded, _ = (
-                                    merge_local_to_global(
-                                        fake_outputs_noisy,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                        metadata,
-                                    )
-                                )
-                                real_global_embedded, real_global_mask_embedded, _ = (
-                                    merge_local_to_global(
-                                        batch_local_targets_noisy,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                        metadata,
-                                    )
-                                )
+                            # 应用适度噪声
+                            batch_local_targets_noisy = (
+                                batch_local_targets
+                                + torch.randn_like(batch_local_targets)
+                                * noise_level
+                            )
+                            fake_outputs_noisy = (
+                                fake_outputs
+                                + torch.randn_like(fake_outputs) * noise_level
+                            )
 
-                                # 标签平滑
-                                real_labels = (
-                                    torch.ones(batch_size, 1, device=device) * 0.9
+                            # 嵌入到全局
+                            fake_global_embedded, fake_global_mask_embedded, _ = (
+                                merge_local_to_global(
+                                    fake_outputs_noisy,
+                                    batch_global_inputs,
+                                    batch_global_masks,
+                                    metadata,
                                 )
-                                fake_labels = (
-                                    torch.zeros(batch_size, 1, device=device) + 0.1
+                            )
+                            real_global_embedded, real_global_mask_embedded, _ = (
+                                merge_local_to_global(
+                                    batch_local_targets_noisy,
+                                    batch_global_inputs,
+                                    batch_global_masks,
+                                    metadata,
                                 )
+                            )
 
-                                # 判别器前向传播
-                                fake_predictions, fake_lf, fake_gf = (
-                                    safe_tensor_operation(
-                                        model_cd,
-                                        fake_outputs_noisy,
-                                        batch_local_masks,
-                                        fake_global_embedded,
-                                        fake_global_mask_embedded,
-                                    )
-                                )
-                                real_predictions, real_lf, real_gf = (
-                                    safe_tensor_operation(
-                                        model_cd,
-                                        batch_local_targets_noisy,
-                                        batch_local_masks,
-                                        real_global_embedded,
-                                        real_global_mask_embedded,
-                                    )
-                                )
+                            # 标签平滑
+                            real_labels = (
+                                torch.ones(batch_size, 1, device=device) * 0.9
+                            )
+                            fake_labels = (
+                                torch.zeros(batch_size, 1, device=device) + 0.1
+                            )
 
-                                # 计算准确率
-                                with torch.no_grad():
-                                    real_probs = torch.sigmoid(real_predictions)
-                                    fake_probs = torch.sigmoid(fake_predictions)
-                                    real_acc = (real_probs >= 0.5).float().mean().item()
-                                    fake_acc = (fake_probs < 0.5).float().mean().item()
-
-                                # 获取动态权重
-
-                                real_weight, fake_weight = (
-                                    stability_tracker.get_loss_weights()
+                            # 判别器前向传播
+                            fake_predictions, fake_lf, fake_gf = (
+                                safe_tensor_operation(
+                                    model_cd,
+                                    fake_outputs_noisy,
+                                    batch_local_masks,
+                                    fake_global_embedded,
+                                    fake_global_mask_embedded,
                                 )
+                            )
+                            real_predictions, real_lf, real_gf = (
+                                safe_tensor_operation(
+                                    model_cd,
+                                    batch_local_targets_noisy,
+                                    batch_local_masks,
+                                    real_global_embedded,
+                                    real_global_mask_embedded,
+                                )
+                            )
 
-                                # 计算损失
-                                loss_cd_real = (
-                                    F.binary_cross_entropy_with_logits(
-                                        real_predictions, real_labels
-                                    )
-                                    * real_weight
-                                )
-                                loss_cd_fake = (
-                                    F.binary_cross_entropy_with_logits(
-                                        fake_predictions, fake_labels
-                                    )
-                                    * fake_weight
-                                )
+                            # 计算准确率
+                            with torch.no_grad():
+                                real_probs = torch.sigmoid(real_predictions)
+                                fake_probs = torch.sigmoid(fake_predictions)
+                                real_acc = (real_probs >= 0.5).float().mean().item()
+                                fake_acc = (fake_probs < 0.5).float().mean().item()
 
-                                # 特征对比损失（减少权重）
-                                fm_loss_d = (
-                                    feature_contrastive_loss(
-                                        real_lf, real_gf, fake_lf, fake_gf
-                                    )
-                                    * fm_weight
-                                )
+                            # 获取动态权重
 
-                                # 组合判别器损失并标准化
-                                loss_cd = (
-                                    (loss_cd_real + loss_cd_fake + fm_loss_d)
-                                    * alpha_d
-                                    / accumulation_steps
+                            real_weight, fake_weight = (
+                                stability_tracker.get_loss_weights()
+                            )
+
+                            # 计算损失
+                            loss_cd_real = (
+                                F.binary_cross_entropy_with_logits(
+                                    real_predictions, real_labels
                                 )
+                                * real_weight
+                            )
+                            loss_cd_fake = (
+                                F.binary_cross_entropy_with_logits(
+                                    fake_predictions, fake_labels
+                                )
+                                * fake_weight
+                            )
+
+                            # 特征对比损失（减少权重）
+                            fm_loss_d = (
+                                feature_contrastive_loss(
+                                    real_lf, real_gf, fake_lf, fake_gf
+                                )
+                                * fm_weight
+                            )
+
+                            # 组合判别器损失并标准化
+                            loss_cd = (
+                                (loss_cd_real + loss_cd_fake + fm_loss_d)
+                                * alpha_d
+                                / accumulation_steps
+                            )
 
                             # 判别器反向传播
-                            scaler_cd.scale(loss_cd).backward()
+                            # scaler_cd.scale(loss_cd).backward()
+                            loss_cd.backward()
 
                             # =================== 训练BQD =======================
                             for param in model_bqd.parameters():
@@ -3644,9 +3648,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # 确保loss是标量
                             bqd_loss_out = ensure_scalar_loss(bqd_loss_out)
                             bqd_loss_out_scaled = bqd_loss_out / accumulation_steps * 2
-                            scaler_bqd_p3.scale(bqd_loss_out_scaled).backward(
+                            '''scaler_bqd_p3.scale(bqd_loss_out_scaled).backward(
                                 retain_graph=True
-                            )
+                            )'''
 
                             # 第二次backward
                             bqd_outputs_in, bqd_loss_in, _ = model_bqd(
@@ -3654,11 +3658,25 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             )
                             bqd_loss_in = ensure_scalar_loss(bqd_loss_in)
                             bqd_loss_in_scaled = bqd_loss_in / accumulation_steps * 2
-                            scaler_bqd_p3.scale(bqd_loss_in_scaled).backward(
-                                retain_graph=True
+
+                            bqd_loss_ta_scaled = (bqd_loss_out_scaled + bqd_loss_in_scaled)
+                            # scaler_bqd_p3.scale(bqd_loss_ta_scaled).backward()
+                            bqd_loss_ta_scaled.backward()
+                            
+                            
+                            '''# 第3次backward
+                            bqd_outputs_ta, bqd_loss_ta, _ = model_bqd(
+                                batch_local_targets, torch.zeros_like(batch_local_targets)
                             )
-                            av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled) / 2
-                            # 第3次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
+                            bqd_loss_ta = ensure_scalar_loss(bqd_loss_ta)
+                            bqd_loss_ta_scaled = (
+                                bqd_loss_ta / accumulation_steps * 2
+                            )
+                            scaler_bqd_p3.scale(bqd_loss_ta_scaled).backward() '''
+
+                            av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled + bqd_loss_ta_scaled) / 3
+
+                            # - 补全网络的对抗损失（让生成结果欺骗BQD） ####
 
                             """ # 冻结BQD参数，避免对抗损失影响BQD训练
                             for param in model_bqd.parameters():
@@ -3683,74 +3701,75 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             for param in model_cn.parameters():
                                 param.requires_grad = True
 
-                            with autocast(
+                            '''with autocast(
                                 device_type=device.type,
                                 dtype=torch.float32,
                                 enabled=True,
-                            ):
-                                # 重新生成（需要梯度）
-                                fake_outputs = safe_tensor_operation(
-                                    model_cn,
-                                    batch_local_inputs,
-                                    batch_local_masks,
+                            ):'''
+                            # 重新生成（需要梯度）
+                            fake_outputs = safe_tensor_operation(
+                                model_cn,
+                                batch_local_inputs,
+                                batch_local_masks,
+                                batch_global_inputs,
+                                batch_global_masks,
+                            )
+
+                            # 重建损失
+                            fake_completed, fake_completed_mask, pos = (
+                                merge_local_to_global(
+                                    fake_outputs,
                                     batch_global_inputs,
                                     batch_global_masks,
+                                    metadata,
                                 )
+                            )
+                            loss_cn_recon = completion_network_loss(
+                                fake_outputs,
+                                batch_local_targets,
+                                batch_local_masks,
+                                batch_global_targets,
+                                fake_completed,
+                                fake_completed_mask,
+                                pos,
+                            )
 
-                                # 重建损失
-                                fake_completed, fake_completed_mask, pos = (
-                                    merge_local_to_global(
-                                        fake_outputs,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                        metadata,
-                                    )
-                                )
-                                loss_cn_recon = completion_network_loss(
+                            # 对抗损失
+                            fake_global_embedded, fake_global_mask_embedded, _ = (
+                                merge_local_to_global(
                                     fake_outputs,
-                                    batch_local_targets,
+                                    batch_global_inputs,
+                                    batch_global_masks,
+                                    metadata,
+                                )
+                            )
+                            fake_predictions, fake_lf, fake_gf = (
+                                safe_tensor_operation(
+                                    model_cd,
+                                    fake_outputs,
                                     batch_local_masks,
-                                    batch_global_targets,
-                                    fake_completed,
-                                    fake_completed_mask,
-                                    pos,
+                                    fake_global_embedded,
+                                    fake_global_mask_embedded,
                                 )
+                            )
+                            loss_cn_adv = F.binary_cross_entropy_with_logits(
+                                fake_predictions, real_labels
+                            )
+                            # BQD损失
+                            _, _, bloss = model_bqd(fake_outputs, batch_local_masks)
+                            # 确保loss是标量 - 新增这行
+                            bloss = ensure_scalar_loss(bloss) 
+                            if step>steps_3 * 3/5:
+                                bloss *= 5
 
-                                # 对抗损失
-                                fake_global_embedded, fake_global_mask_embedded, _ = (
-                                    merge_local_to_global(
-                                        fake_outputs,
-                                        batch_global_inputs,
-                                        batch_global_masks,
-                                        metadata,
-                                    )
-                                )
-                                fake_predictions, fake_lf, fake_gf = (
-                                    safe_tensor_operation(
-                                        model_cd,
-                                        fake_outputs,
-                                        batch_local_masks,
-                                        fake_global_embedded,
-                                        fake_global_mask_embedded,
-                                    )
-                                )
-                                loss_cn_adv = F.binary_cross_entropy_with_logits(
-                                    fake_predictions, real_labels
-                                )
-                                # BQD损失
-                                _, _, bloss = model_bqd(fake_outputs, batch_local_masks)
-                                # 确保loss是标量 - 新增这行
-                                bloss = ensure_scalar_loss(bloss) 
-                                if step>steps_3 * 3/5:
-                                    bloss *= 5
-
-                                # 组合生成器损失并标准化
-                                loss_cn = (
-                                    loss_cn_recon + alpha_g * loss_cn_adv + bloss
-                                ) / accumulation_steps
+                            # 组合生成器损失并标准化
+                            loss_cn = (
+                                loss_cn_recon + alpha_g * loss_cn_adv + bloss
+                            ) / accumulation_steps
 
                             # 生成器反向传播
-                            scaler_cn.scale(loss_cn).backward(retain_graph=False)
+                            # scaler_cn.scale(loss_cn).backward(retain_graph=False)
+                            loss_cn.backward(retain_graph=False)
 
                             # ==================== 累积梯度更新 ====================
                             accumulated_step += 1
@@ -3771,30 +3790,31 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 or accumulated_step == len(train_loader)
                             ):
                                 # 更新判别器
-                                scaler_cd.unscale_(opt_cd_p3)
+                                # scaler_cd.unscale_(opt_cd_p3)
                                 torch.nn.utils.clip_grad_norm_(
                                     model_cd.parameters(), max_norm=0.5
                                 )
-                                scaler_cd.step(opt_cd_p3)
-                                scaler_cd.update()
+                                # scaler_cd.step(opt_cd_p3)
+                                opt_cd_p3.step()
+                                # scaler_cd.update()
                                 opt_cd_p3.zero_grad(set_to_none=True)
 
                                 # 更新BQD
-                                scaler_bqd_p3.unscale_(opt_bqd)
+                                # scaler_bqd_p3.unscale_(opt_bqd)
                                 torch.nn.utils.clip_grad_norm_(
                                     model_bqd.parameters(), max_norm=1.0
                                 )
-                                scaler_bqd_p3.step(opt_bqd)
-                                scaler_bqd_p3.update()
+                                # scaler_bqd_p3.step(opt_bqd)
+                                # scaler_bqd_p3.update()
                                 opt_bqd.zero_grad(set_to_none=True)
 
                                 # 更新生成器
-                                scaler_cn.unscale_(opt_cn_p3)
+                                # scaler_cn.unscale_(opt_cn_p3)
                                 torch.nn.utils.clip_grad_norm_(
                                     model_cn.parameters(), max_norm=1.0
                                 )
-                                scaler_cn.step(opt_cn_p3)
-                                scaler_cn.update()
+                                # scaler_cn.step(opt_cn_p3)
+                                # scaler_cn.update()
                                 opt_cn_p3.zero_grad(set_to_none=True)
 
                                 # 更新稳定性追踪器
@@ -4013,6 +4033,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                             bqd_out, _, _ = model_bqd(
                                                 test_output, test_local_masks
                                             )
+                                            bqd_target, _, _ = model_bqd(
+                                                test_local_targets, test_local_masks
+                                            )
 
                                             visualize_results(
                                                 test_local_targets,
@@ -4020,6 +4043,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                 test_output,
                                                 bqd_in,
                                                 bqd_out,
+                                                bqd_target,
                                                 completed,
                                                 step,
                                                 "phase_3",
@@ -4225,18 +4249,18 @@ if __name__ == "__main__":
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="results22", help="directory to save results"
+        "--dir", type=str, default="results24", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEM22", help="visdom environment name"
+        "--envi", type=str, default="DEM24", help="visdom environment name"
     )
-    parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=2, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():

@@ -90,10 +90,10 @@ class BoundaryQualityDiscriminator(nn.Module):
         else:
             print("Warning: mask_sum is zero, loss_mask will be zero.")
             loss_mask = loss_mask'''
-        loss_mask = loss_mask * 100
+        loss_mask = loss_mask * 2
         # print(f"loss_full: {loss_full.item()}, loss_mask: {loss_mask.item()}")
 
-        return extracted_boundary, loss_full, loss_mask
+        return extracted_boundary, loss_full, loss_mask*0.1
 
 
 class AdaptiveBoundaryLoss(nn.Module):
@@ -106,6 +106,7 @@ class AdaptiveBoundaryLoss(nn.Module):
         self.training_mode = training_mode  # 'pretrain' or 'adversarial'
         self.mse_loss = nn.MSELoss()
         self.l1_loss = nn.L1Loss()
+        self.bce_loss = F.binary_cross_entropy
 
     def forward(self, extracted_boundary, true_boundary):
         """
@@ -122,10 +123,11 @@ class AdaptiveBoundaryLoss(nn.Module):
         # 基础边界提取误差
         boundary_mse = self.mse_loss(extracted_boundary, true_boundary)
         boundary_l1 = self.l1_loss(extracted_boundary, true_boundary)
+        boundary_bce = self.bce_loss(extracted_boundary,true_boundary)
 
         if self.training_mode == "pretrain":
             # 预训练阶段：希望提取准确，minimize error
-            discriminator_loss = boundary_mse + 0.0 * boundary_l1
+            discriminator_loss = boundary_bce
             loss_direction = "minimize_error"
 
         elif self.training_mode == "adversarial":

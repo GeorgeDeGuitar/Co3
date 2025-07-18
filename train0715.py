@@ -21,8 +21,8 @@ from loss import completion_network_loss
 import torch.nn.functional as F
 
 # Import your models
-from models_simp import ContextDiscriminator  # models626
-from modelcn3 import CompletionNetwork
+from models_ori import ContextDiscriminator  # models626
+from modelcn4 import CompletionNetwork
 
 # Import your custom dataset
 ## from DemDataset1 import DemDataset
@@ -1344,7 +1344,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         print(f"加载预训练权重失败: {e}")
             elif phase == 3:
                 # Load pre-trained weights if available
-                pretrained_weights_path_cn = r"E:\KingCrimson Dataset\Simulate\data0\results20pre\phase_1\model_cn_best"
+                pretrained_weights_path_cn = r"e:\KingCrimson Dataset\Simulate\data0\results23\phase_1\model_cn_step160000"
                 if os.path.exists(pretrained_weights_path_cn):
                     try:
                         model_cn.load_state_dict(
@@ -1360,7 +1360,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CN预训练权重失败: {e}")
 
-                pretrained_weights_path_cd = r"E:\KingCrimson Dataset\Simulate\data0\results19p2\phase_2\model_cd_best"
+                pretrained_weights_path_cd = r"e:\KingCrimson Dataset\Simulate\data0\results20pre\phase_2\model_cd_best"
                 if os.path.exists(pretrained_weights_path_cd):
                     try:
                         model_cd.load_state_dict(
@@ -1376,7 +1376,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CD预训练权重失败: {e}")
 
-                pretrained_weights_path_bqd = r"E:\KingCrimson Dataset\Simulate\data0\results20pre\bqd\model_bqd_best"
+                pretrained_weights_path_bqd = r"e:\KingCrimson Dataset\Simulate\data0\results23\bqd\model_bqd_step160000"
                 if os.path.exists(pretrained_weights_path_bqd):
                     try:
                         model_bqd.load_state_dict(
@@ -1688,20 +1688,20 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     for i in range(num_edge):
                         x = i * (edge_width + gap_size)
                         y = 0
-                        edge_grid_img.paste(colored_edge_in[i], (x, y))
+                        edge_grid_img.paste(colored_edge_target[i], (x, y))
                     
                     # 第二行: edge_outputs
                     for i in range(num_edge):
                         x = i * (edge_width + gap_size)
                         y = edge_height + gap_size
-                        edge_grid_img.paste(colored_edge_out[i], (x, y))
+                        edge_grid_img.paste(colored_edge_in[i], (x, y))
                     
                     # 第三行: edge_targets (如果存在)
                     if has_edge_targets:
                         for i in range(num_edge):
                             x = i * (edge_width + gap_size)
                             y = (edge_height + gap_size) * 2
-                            edge_grid_img.paste(colored_edge_target[i], (x, y))
+                            edge_grid_img.paste(colored_edge_out[i], (x, y))
                     
                     # 放大和local_inputs一样
                     edge_grid_img = edge_grid_img.resize(
@@ -2167,7 +2167,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )
                                 scaler_bqd.scale(bqd_loss_in_scaled).backward(retain_graph=True) 
 
-                                if step>5000:
+                                if step>5000 and step%10==0:
                                     #### 第3次backward - BQD网络学习识别target的全0边缘 ####
                                     bqd_outputs_ta, bqd_loss_ta, _ = model_bqd(
                                         batch_local_targets, torch.zeros_like(batch_local_targets)
@@ -2176,7 +2176,10 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     bqd_loss_ta_scaled = (
                                         bqd_loss_ta / accumulation_steps * 2
                                     )
-                                    scaler_bqd.scale(bqd_loss_ta_scaled).backward()                              
+                                    scaler_bqd.scale(bqd_loss_ta_scaled).backward(retain_graph = True)
+                               #  else:
+                                    # scaler_bqd.scale(bqd_loss_ta_scaled).backward(retain_graph = True)
+
 
                             #### 第4次backward - 补全网络的对抗损失（让生成结果欺骗BQD） ####
                             if True:
@@ -2214,7 +2217,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     )
                                     / accumulation_steps
                                 )
-                                if outputs is not None and step>10000:
+                                if outputs is not None and step>20000:
                                     # 重新计算BQD输出，但不detach，让梯度流向补全网络
                                     # !!!!注意，此处只返回mask部分的loss，否则会使mask外的异常边缘提取被判为优
                                     _, _, bqd_loss_mask_adversarial = model_bqd(
@@ -3647,7 +3650,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 # 特征对比损失（减少权重）
                                 fm_loss_d = (
                                     feature_contrastive_loss(
-                                        real_lf, real_gf, 0, fake_lf, fake_gf, 0
+                                        real_lf, real_gf, fake_lf, fake_gf
                                     )
                                     * fm_weight
                                 )
@@ -3712,7 +3715,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             bqd_loss_ta_scaled = (
                                 bqd_loss_ta / accumulation_steps * 2
                             )
-                            scaler_bqd.scale(bqd_loss_ta_scaled).backward() 
+                            scaler_bqd_p3.scale(bqd_loss_ta_scaled).backward() 
 
                             av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled + bqd_loss_ta_scaled) / 3
 
@@ -4298,7 +4301,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=3, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():

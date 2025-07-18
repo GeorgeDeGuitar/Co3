@@ -935,5 +935,5 @@ def completion_network_loss(
         f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Boundary loss: {insm_loss*bw}"
     )'''
     # return (null_loss * nw + bw * boundary_loss + edge_loss * ew + consistency_loss * cw + gradient_loss * cg + variation_loss*vw + gradient_similarity*gsw)/totalw
-    return (null_loss * nw + consistency_loss * cw + fa_loss * faw + insm_loss * bw) / totalw
+    return 10*(null_loss * nw + consistency_loss * cw + fa_loss * faw + insm_loss * bw) / totalw
 
