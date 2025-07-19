@@ -1089,7 +1089,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         )
         # opt_cd_p1 = Adadelta(model_cd.parameters())
         opt_cd_p2 = torch.optim.Adam(
-            model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8
+            model_cd.parameters(), lr=0.4*1e-5, betas=(0.5, 0.999), eps=1e-8
         )
         opt_cn_p3 = torch.optim.Adam(
             model_cn.parameters(), lr=1e-4, betas=(0.5, 0.999), eps=1e-8
@@ -1330,7 +1330,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
             if phase == 2:
                 # Load pre-trained weights if available
-                pretrained_weights_path = r"e:\KingCrimson Dataset\Simulate\data0\results22\phase_1\model_cn_best"
+                pretrained_weights_path = r"e:\KingCrimson Dataset\Simulate\data0\results24\phase_1\model_cn_step160000"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(
@@ -2844,7 +2844,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             real_mask,
             real_global,
             real_global_mask,
-            weight=1e3,
+            weight=1e4,
         ):
             """R1正则化 - 在真实数据上的梯度惩罚"""
             try:
@@ -2891,7 +2891,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             try:
                 # 使用Adam优化器
                 opt_cd = torch.optim.Adam(
-                    model_cd.parameters(), lr=2e-5, betas=(0.5, 0.999), eps=1e-8
+                    model_cd.parameters(), lr=1e-5, betas=(0.5, 0.999), eps=1e-8
                 )
 
                 # 创建梯度缩放器，用于自动混合精度训练
@@ -3072,7 +3072,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # 梯度裁剪
                             # scaler2.unscale_(opt_cd_p2)
                             torch.nn.utils.clip_grad_norm_(
-                                model_cd.parameters(), max_norm=1.0
+                                model_cd.parameters(), max_norm=5.0
                             )
 
                             # 更新参数
@@ -4249,18 +4249,18 @@ if __name__ == "__main__":
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="results24", help="directory to save results"
+        "--dir", type=str, default="results22p2", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEM24", help="visdom environment name"
+        "--envi", type=str, default="DEM22", help="visdom environment name"
     )
-    parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:1", help="CUDA device to use")
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=2, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():

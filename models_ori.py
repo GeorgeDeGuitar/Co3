@@ -450,9 +450,10 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
         slope = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + epsilon)
         
         # 限制值范围，防止极值
-        slope = torch.clamp(slope, min=0.0, max=10.0)
+        # slope = torch.clamp(slope, min=0.0, max=10.0)
+        # print(f"slope min: {slope.min().item():.4f}, max: {slope.max().item():.4f}, mean: {slope.mean().item():.4f}")
 
-        '''# 归一化坡度
+        # 归一化坡度
         slope_min = slope.min()
         slope_max = slope.max()
         
@@ -464,7 +465,7 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
             # 如果范围太小，直接设为0.5
             slope = torch.full_like(slope, 0.5)
 
-        # 归一化输入
+        '''# 归一化输入
         x_min = x.min()
         x_max = x.max()
         
@@ -623,7 +624,7 @@ class GlobalDiscriminator(nn.Module):
         self.linear = nn.Sequential(
             spectral_norm(nn.Linear(self.feature_size, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5)  # 增加Dropout
+            nn.Dropout(0.2)  # 增加Dropout
         )
 
     def forward(self, globalin, mask):
@@ -756,7 +757,7 @@ class LocalDiscriminator(nn.Module):
         self.linear = nn.Sequential(
             spectral_norm(nn.Linear(self.feature_size, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5)  # 增加Dropout
+            nn.Dropout(0.2)  # 增加Dropout
         )
 
     def forward(self, local, mask):
@@ -835,14 +836,14 @@ class ContextDiscriminator(nn.Module):
         self.fusion = nn.Sequential(
             spectral_norm(nn.Linear(1024 + 1024, 1024)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.6)  # 增加dropout以提高正则化
+            nn.Dropout(0.3)  # 增加dropout以提高正则化
         )
 
         # 分类器 - 更简单的架构
         self.classifier = nn.Sequential(
             spectral_norm(nn.Linear(1024, 512)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(0.2),
             spectral_norm(nn.Linear(512, 1))  # 输出logits，适配BCEWithLogitsLoss
         )
 
