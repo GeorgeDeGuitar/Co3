@@ -754,8 +754,8 @@ class DemDataset(Dataset):
                 )
                 ## 归一化
                 # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
-                global_min = id_target.min()
-                global_max = id_target.max()
+                global_min = id_array.min()
+                global_max = id_array.max()
                 
                 # 避免除零错误
                 if global_max - global_min > 1e-8:
@@ -907,8 +907,8 @@ class DemDataset(Dataset):
 
                 ## 归一化
                 # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
-                global_min = id_target.min()
-                global_max = id_target.max()
+                global_min = id_array.min()
+                global_max = id_array.max()
                 
                 # 避免除零错误
                 if global_max - global_min > 1e-8:
@@ -1076,8 +1076,8 @@ class DemDataset(Dataset):
 
                 ## 归一化
                 # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
-                global_min = id_target.min()
-                global_max = id_target.max()
+                global_min = id_array.min()
+                global_max = id_array.max()
                 
                 # 避免除零错误
                 if global_max - global_min > 1e-8:
@@ -1215,8 +1215,8 @@ class DemDataset(Dataset):
 
             # 归一化
             # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
-            global_min = id_target.min()
-            global_max = id_target.max()
+            global_min = id_array.min()
+            global_max = id_array.max()
             
             # 避免除零错误
             if global_max - global_min > 1e-8:
@@ -1533,110 +1533,255 @@ def merge_input_channels(input_data, empty_value=100.0, visualize=False):
     return merged_data, False
 
 
-# 示例使用
+# 在DemDataset的main函数中添加数据分布统计代码
+
 if __name__ == "__main__":
-    jsonDir = r"E:\KingCrimson Dataset\Simulate\data0\json"
-    arrayDir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\array"
-    maskDir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask\mask"
-    targetDir = r"E:\KingCrimson Dataset\Simulate\data0\groundtruthstatus\statusarray"
+   jsonDir = r"E:\KingCrimson Dataset\Simulate\data0\json"
+   arrayDir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\array"
+   maskDir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\mask"
+   targetDir = r"E:\KingCrimson Dataset\Simulate\data0\groundtruthstatus\statusarray"
 
-    # 创建增强数据集
-    dataset = DemDataset(
-        jsonDir,
-        arrayDir,
-        maskDir,
-        targetDir,
-        min_valid_pixels=20,
-        max_valid_pixels=800,
-        enable_synthetic_masks=True,  # 启用生成式mask
-        synthetic_ratio=1.0,  # 每个原始数据生成1个合成数据
-    )
+   # 创建数据集
+   dataset = DemDataset(
+       jsonDir,
+       arrayDir,
+       maskDir,
+       targetDir,
+       min_valid_pixels=20,
+       max_valid_pixels=800,
+       enable_synthetic_masks=True,
+       synthetic_ratio=1.0,
+   )
 
-    print(f"增强后数据集大小: {len(dataset)}")
+   print(f"数据集大小: {len(dataset)}")
 
-    # 可视化生成式mask效果
-    if dataset.enable_synthetic_masks and len(dataset) > dataset.original_length:
-        print("🎨 生成数据增强可视化...")
-        dataset.visualize_synthetic_mask(
-            num_samples=4, save_dir="./mask_visualization_results"
-        )
+   # 创建DataLoader
+   dataloader = DataLoader(
+       dataset,
+       batch_size=8,
+       shuffle=True,
+       collate_fn=fast_collate_fn,
+       num_workers=2,
+       pin_memory=True,
+       prefetch_factor=2,
+       persistent_workers=True,
+   )
 
-    # 使用标准DataLoader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=8,
-        shuffle=True,
-        collate_fn=fast_collate_fn,
-        num_workers=2,
-        pin_memory=True,
-        prefetch_factor=2,
-        persistent_workers=True,
-    )
+   # ===================== 数据分布统计 =====================
+   print("\n" + "="*60)
+   print("📊 开始统计数据分布信息...")
+   print("="*60)
+   
+   # 统计变量
+   all_input_processed = []
+   all_input_targets = []
+   all_id_arrays = []
+   all_id_targets = []
+   
+   # 分布统计
+   input_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+   target_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+   global_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+   
+   # 归一化前的原始数据统计
+   raw_input_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+   raw_target_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+   raw_global_stats = {'min': [], 'max': [], 'mean': [], 'std': []}
+   
+   # 采样统计（避免内存溢出）
+   sample_count = 0
+   max_samples = 100  # 统计前100个batch
+   
+   print(f"正在采样前 {max_samples} 个batch进行统计...")
+   
+   for batch_idx, batch_data in enumerate(dataloader):
+       if batch_idx >= max_samples:
+           break
+           
+       (inputs, input_masks, input_targets, 
+        id_arrays, id_masks, id_targets, metadata) = batch_data
+       
+       batch_size = inputs.shape[0]
+       sample_count += batch_size
+       
+       # 打印前几个样本的详细信息
+       if batch_idx < 3:
+           print(f"\n--- Batch {batch_idx + 1} 详细信息 ---")
+           for i in range(min(3, batch_size)):
+               inp = inputs[i].squeeze()
+               inp_tgt = input_targets[i].squeeze()
+               id_arr = id_arrays[i].squeeze()
+               id_tgt = id_targets[i].squeeze()
+               
+               print(f"样本 {i+1}:")
+               print(f"  local_input   - min: {inp.min():.4f}, max: {inp.max():.4f}, mean: {inp.mean():.4f}")
+               print(f"  local_target  - min: {inp_tgt.min():.4f}, max: {inp_tgt.max():.4f}, mean: {inp_tgt.mean():.4f}")
+               print(f"  global_array  - min: {id_arr.min():.4f}, max: {id_arr.max():.4f}, mean: {id_arr.mean():.4f}")
+               print(f"  global_target - min: {id_tgt.min():.4f}, max: {id_tgt.max():.4f}, mean: {id_tgt.mean():.4f}")
+               
+               # 检查是否有异常值
+               abnormal = False
+               if inp.min() < -0.1 or inp.max() > 1.1:
+                   print(f"  ⚠️  local_input 超出[0,1]范围！")
+                   abnormal = True
+               if inp_tgt.min() < -0.1 or inp_tgt.max() > 1.1:
+                   print(f"  ⚠️  local_target 超出[0,1]范围！")
+                   abnormal = True
+               if id_arr.min() < -0.1 or id_arr.max() > 1.1:
+                   print(f"  ⚠️  global_array 超出[0,1]范围！")
+                   abnormal = True
+               if id_tgt.min() < -0.1 or id_tgt.max() > 1.1:
+                   print(f"  ⚠️  global_target 超出[0,1]范围！")
+                   abnormal = True
 
-    # 测试数据加载
-    print("🔄 测试数据加载器...")
-    start_time = time.time()
-    valid_batches = 0
-
-    for i, batch_data in enumerate(dataloader):
-        (
-            inputs,
-            input_masks,
-            input_targets,
-            id_arrays,
-            id_masks,
-            id_targets,
-            metadata,
-        ) = batch_data
-        valid_batches += 1
-
-        if i == 0:  # 只打印第一个批次的详细信息
-            print(f"批次 {i+1}, 样本数: {len(inputs)}")
-
-            # 分析mask特征
-            concentrated_count = 0
-            scattered_count = 0
-
-            for j in range(min(3, len(metadata))):
-                id_val = metadata[j][6].item()
-                valid_pixels = torch.sum(input_masks[j] == 1).item()
-                missing_ratio = 1.0 - (input_masks[j].float().mean().item())
-
-                # 简单判断mask类型
-                mask_np = input_masks[j].squeeze().numpy()
-                if SCIPY_AVAILABLE:
-                    labeled_mask, num_regions = label(mask_np == 0)
-                    mask_type = "集中" if num_regions <= 2 else "分散"
-                else:
-                    # 简单的连通区域计数替代
-                    mask_type = "集中" if missing_ratio > 0.1 else "原始"
-
-                if mask_type == "集中":
-                    concentrated_count += 1
-                else:
-                    scattered_count += 1
-
-                print(
-                    f"  样本 {j+1}: ID={id_val}, valid_pixels={valid_pixels}, "
-                    f"缺失={missing_ratio:.1%} ({mask_type})"
-                )
-
-            print(f"  批次统计: {concentrated_count}个集中, {scattered_count}个其他")
-
-        if i >= 5:  # 测试5个批次
-            break
-
-    end_time = time.time()
-    print(f"✅ 测试完成，成功加载 {valid_batches} 个有效批次")
-    print(f"处理时间: {end_time - start_time:.2f}秒")
-    print(f"平均每批次时间: {(end_time - start_time) / valid_batches:.2f}秒")
-
-    print("\n🎯 数据增强总结:")
-    print(f"   - 原始数据: {dataset.original_length}")
-    print(f"   - 生成式数据: {dataset.synthetic_length}")
-    print(
-        f"   - 总数据量: {len(dataset)} (增长 {(len(dataset)/dataset.original_length-1)*100:.0f}%)"
-    )
-    print(f"   - 主要集中mask模式 (~95%)")
-    print(f"   - 少量分散mask模式 (~5%)")
-    print(f"   - 缺失比例范围: 25%-75%")
+               # 如果有异常值则进行对比可视化
+               if abnormal:
+                   import matplotlib.pyplot as plt
+                   fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+                   im0 = axs[0].imshow(id_arr.numpy(), cmap='terrain')
+                   axs[0].set_title('global_array')
+                   plt.colorbar(im0, ax=axs[0])
+                   im1 = axs[1].imshow(id_tgt.numpy(), cmap='terrain')
+                   axs[1].set_title('global_target')
+                   plt.colorbar(im1, ax=axs[1])
+                   plt.suptitle(f"异常样本 {i+1} global_array vs global_target")
+                   plt.tight_layout()
+                   plt.show()
+       
+       # 统计每个batch的分布
+       for i in range(batch_size):
+           inp = inputs[i].squeeze()
+           inp_tgt = input_targets[i].squeeze()
+           id_arr = id_arrays[i].squeeze()
+           id_tgt = id_targets[i].squeeze()
+           
+           # 只统计有效值（排除填充值）
+           inp_valid = inp[inp != 0.5]  # 假设0.5是填充值
+           inp_tgt_valid = inp_tgt[inp_tgt != 0.5]
+           id_arr_valid = id_arr[id_arr != 0.5]
+           id_tgt_valid = id_tgt[id_tgt != 0.5]
+           
+           # Local input统计
+           if len(inp_valid) > 0:
+               input_stats['min'].append(inp_valid.min().item())
+               input_stats['max'].append(inp_valid.max().item())
+               input_stats['mean'].append(inp_valid.mean().item())
+               input_stats['std'].append(inp_valid.std().item())
+           
+           # Local target统计
+           if len(inp_tgt_valid) > 0:
+               target_stats['min'].append(inp_tgt_valid.min().item())
+               target_stats['max'].append(inp_tgt_valid.max().item())
+               target_stats['mean'].append(inp_tgt_valid.mean().item())
+               target_stats['std'].append(inp_tgt_valid.std().item())
+           
+           # Global统计
+           if len(id_tgt_valid) > 0:
+               global_stats['min'].append(id_tgt_valid.min().item())
+               global_stats['max'].append(id_tgt_valid.max().item())
+               global_stats['mean'].append(id_tgt_valid.mean().item())
+               global_stats['std'].append(id_tgt_valid.std().item())
+       
+       # 进度显示
+       if (batch_idx + 1) % 20 == 0:
+           print(f"已处理 {batch_idx + 1}/{max_samples} 个batch...")
+   
+   # ===================== 统计结果分析 =====================
+   print(f"\n" + "="*60)
+   print(f"📈 数据分布统计结果 (基于 {sample_count} 个样本)")
+   print("="*60)
+   
+   def print_stats(stats_dict, name):
+       if len(stats_dict['min']) > 0:
+           print(f"\n{name} 统计:")
+           print(f"  最小值: {np.min(stats_dict['min']):.6f} ~ {np.max(stats_dict['min']):.6f}")
+           print(f"  最大值: {np.min(stats_dict['max']):.6f} ~ {np.max(stats_dict['max']):.6f}")
+           print(f"  均值:   {np.min(stats_dict['mean']):.6f} ~ {np.max(stats_dict['mean']):.6f}")
+           print(f"  标准差: {np.min(stats_dict['std']):.6f} ~ {np.max(stats_dict['std']):.6f}")
+           
+           # 检查归一化情况
+           all_mins = np.array(stats_dict['min'])
+           all_maxs = np.array(stats_dict['max'])
+           
+           out_of_range_min = np.sum(all_mins < -0.01)
+           out_of_range_max = np.sum(all_maxs > 1.01)
+           
+           print(f"  超出[0,1]范围的样本:")
+           print(f"    最小值<0: {out_of_range_min}/{len(all_mins)} ({out_of_range_min/len(all_mins)*100:.1f}%)")
+           print(f"    最大值>1: {out_of_range_max}/{len(all_maxs)} ({out_of_range_max/len(all_maxs)*100:.1f}%)")
+           
+           if out_of_range_min > 0 or out_of_range_max > 0:
+               print(f"  ⚠️  {name} 数据未正确归一化到[0,1]!")
+               print(f"      极值范围: [{np.min(all_mins):.4f}, {np.max(all_maxs):.4f}]")
+           else:
+               print(f"  ✅ {name} 数据正确归一化到[0,1]")
+       else:
+           print(f"\n{name}: 无有效数据")
+   
+   # 打印各类数据的统计
+   print_stats(input_stats, "Local Input")
+   print_stats(target_stats, "Local Target") 
+   print_stats(global_stats, "Global Data")
+   
+   # ===================== 特殊值分析 =====================
+   print(f"\n" + "="*60)
+   print("🔍 特殊值分析")
+   print("="*60)
+   
+   # 重新采样检查特殊值
+   special_value_count = {'0.5': 0, 'negative': 0, 'greater_than_1': 0, 'total_pixels': 0}
+   
+   print("检查特殊值分布...")
+   for batch_idx, batch_data in enumerate(dataloader):
+       if batch_idx >= 20:  # 检查前20个batch
+           break
+           
+       (inputs, input_masks, input_targets, 
+        id_arrays, id_masks, id_targets, metadata) = batch_data
+       
+       for i in range(inputs.shape[0]):
+           inp = inputs[i].squeeze()
+           
+           total_pixels = inp.numel()
+           special_value_count['total_pixels'] += total_pixels
+           
+           # 统计特殊值
+           count_05 = torch.sum(torch.abs(inp - 0.5) < 1e-6).item()
+           count_neg = torch.sum(inp < 0).item()
+           count_gt1 = torch.sum(inp > 1).item()
+           
+           special_value_count['0.5'] += count_05
+           special_value_count['negative'] += count_neg
+           special_value_count['greater_than_1'] += count_gt1
+   
+   print(f"\n特殊值统计 (基于 {special_value_count['total_pixels']} 个像素):")
+   print(f"  值=0.5的像素: {special_value_count['0.5']} ({special_value_count['0.5']/special_value_count['total_pixels']*100:.2f}%)")
+   print(f"  负值像素: {special_value_count['negative']} ({special_value_count['negative']/special_value_count['total_pixels']*100:.2f}%)")
+   print(f"  >1的像素: {special_value_count['greater_than_1']} ({special_value_count['greater_than_1']/special_value_count['total_pixels']*100:.2f}%)")
+   
+   # ===================== 结论和建议 =====================
+   print(f"\n" + "="*60)
+   print("💡 结论和建议")
+   print("="*60)
+   
+   total_problematic = special_value_count['negative'] + special_value_count['greater_than_1']
+   if total_problematic > 0:
+       print(f"❌ 发现 {total_problematic} 个像素超出[0,1]范围")
+       print(f"   这表明数据归一化存在问题")
+       print(f"   建议检查归一化逻辑，特别是:")
+       print(f"   1. 归一化基准的选择（global_min, global_max的计算）")
+       print(f"   2. 是否有数据在归一化前/后被错误处理")
+       print(f"   3. 检查else分支是否被正确执行")
+   else:
+       print(f"✅ 所有数据都在[0,1]范围内，归一化正确")
+   
+   if special_value_count['0.5'] > special_value_count['total_pixels'] * 0.1:
+       print(f"⚠️  发现大量0.5值 ({special_value_count['0.5']/special_value_count['total_pixels']*100:.1f}%)")
+       print(f"   这可能表明:")
+       print(f"   1. 大量数据触发了else分支（范围过小）")
+       print(f"   2. 大量无效数据被填充为0.5")
+       print(f"   建议检查数据质量和填充策略")
+   
+   print(f"\n" + "="*60)
+   print("📊 统计完成")
+   print("="*60)

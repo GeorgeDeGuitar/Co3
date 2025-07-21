@@ -90,7 +90,7 @@ class BoundaryQualityDiscriminator(nn.Module):
         else:
             print("Warning: mask_sum is zero, loss_mask will be zero.")
             loss_mask = loss_mask'''
-        loss_mask = loss_mask*0.5
+        loss_mask = loss_mask*0.1
         # print(f"loss_full: {loss_full.item()}, loss_mask: {loss_mask.item()}")
 
         return extracted_boundary, loss_full, loss_mask*0.1
