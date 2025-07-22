@@ -664,7 +664,7 @@ class CompletionNetwork(nn.Module):
             # 不使用插值，保持原始输入
             local_input_processed = local_input
         
-        '''# 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
+        # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
         global_min = global_input.min()
         global_max = global_input.max()
         
@@ -676,7 +676,7 @@ class CompletionNetwork(nn.Module):
         else:
             # 如果范围太小，直接设为0.5
             global_input = torch.full_like(global_input, 0.5)
-            local_input = torch.full_like(local_input, 0.5)'''
+            local_input = torch.full_like(local_input, 0.5)
 
         # Apply early attention
         local_input_attended = self.early_local_attention(local_input, local_mask)
@@ -787,12 +787,12 @@ class CompletionNetwork(nn.Module):
 
         final_output = (local_input * local_mask + output * (1 - local_mask))
         # 将网络输出从[0, 1]逆归一化到原始数据范围
-        '''if global_max - global_min > 1e-8:
+        if global_max - global_min > 1e-8:
             output = final_output * (global_max - global_min) + global_min
         else:
-            output = final_output'''
+            output = final_output
 
-        return final_output
+        return output
 
 import torch
 import torch.nn as nn

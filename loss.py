@@ -909,7 +909,7 @@ def completion_network_loss(
     )  # target 是目标补全图像'''
     # smooth_loss = masked_tv_loss(completed, completed_mask) * 100
     # 边界连续性损失（掩码边界过渡）
-    boundary_loss = boundary_continuity_loss(output, local_target, mask, sigma=0.5)*5  # 边界连续性损失，强调补全区域与非补全区域的平滑过渡
+    # boundary_loss = boundary_continuity_loss(output, local_target, mask, sigma=0.5)*5  # 边界连续性损失，强调补全区域与非补全区域的平滑过渡
     # 各阶梯度损失
     # edge_loss = edge_continuity_loss(completed, global_target, pos, 2, completed_mask)*10
     # 空间一致性损失
@@ -924,9 +924,9 @@ def completion_network_loss(
     # blurred_mask = enhanced_gradient_loss.smooth_mask_generate(mask)
     # variation_loss = total_variation_loss(output, mask)*100 #全变差损失，相邻像素差异
     
-    fa_boundary_loss = ElevationBoundaryContinuityLoss().to(output.device)
-    all_fa_loss = fa_boundary_loss(output, local_target, mask)
-    fa_loss = all_fa_loss['total']*1e-4
+    # fa_boundary_loss = ElevationBoundaryContinuityLoss().to(output.device)
+    # all_fa_loss = fa_boundary_loss(output, local_target, mask)
+    # fa_loss = all_fa_loss['total']*1e-4
     insm_loss = input_smoothness_loss(output, mask, sigma=0.5) * 0.02 # 输入平滑性损失，鼓励生成输出在边界区域的平滑性
     # gradient_similarity = gradient_similarity_loss(output,local_target)*1000 # 梯度相似性损失，梯度方向的一致性
     # ssim = ssim_loss(output,local_target)*10
@@ -935,5 +935,5 @@ def completion_network_loss(
         f"Null loss: {null_loss*nw}, Consistency loss: {consistency_loss*cw}, Boundary loss: {insm_loss*bw}"
     )'''
     # return (null_loss * nw + bw * boundary_loss + edge_loss * ew + consistency_loss * cw + gradient_loss * cg + variation_loss*vw + gradient_similarity*gsw)/totalw
-    return 10*(null_loss * nw + consistency_loss * cw + fa_loss * faw + insm_loss * bw) / totalw
+    return (null_loss * nw + consistency_loss * cw +  + insm_loss * bw) / totalw
 

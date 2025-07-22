@@ -824,10 +824,23 @@ def safe_tensor_float(tensor_or_tuple):
             f"Expected tensor or tuple containing tensor, got {type(tensor)}"
         )
 
-
-# 使用示例：
-# target_masks, success_flags = generate_target_mask(batch_global_masks, metadata)
-# target_masks_float = safe_tensor_float(target_masks)  # 安全转换为float
+def nomarlize(local_inputs, local_targets, global_inputs, global_targets):
+    ## 归一化
+    # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
+    global_min = global_inputs.min()
+    global_max = global_inputs.max()
+    
+    # 避免除零错误
+    if global_max - global_min > 1e-8:
+        # 归一化到[0, 1]
+        local_inputs = (local_inputs - global_min) / (global_max - global_min)
+        local_targets = (local_targets - global_min) / (global_max - global_min)
+        global_inputs = (global_inputs - global_min) / (global_max - global_min)
+        global_targets = (global_targets - global_min) / (global_max - global_min)
+        return local_inputs, local_targets, global_inputs, global_targets
+    else:
+        print("Warning: global_inputs的最大值和最小值相等，无法进行归一化。")
+        return local_inputs, local_targets, global_inputs, global_targets
 
 
 def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
@@ -2844,7 +2857,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             real_mask,
             real_global,
             real_global_mask,
-            weight=1e4,
+            weight=1e3,
         ):
             """R1正则化 - 在真实数据上的梯度惩罚"""
             try:
@@ -2901,8 +2914,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 scheduler = CosineAnnealingLR(opt_cd_p2, T_max=steps_2, eta_min=1e-6)
 
                 # 实例噪声初始值和最小值
-                start_noise = 0.01
-                min_noise = 0.006
+                start_noise = 0.1
+                min_noise = 0.001
 
                 # 跟踪性能指标
                 running_loss = 0.0
@@ -2933,157 +2946,158 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             ) = batch_data
 
                             # 使用自动混合精度
-                            '''with autocast(
+                            with autocast(
                                 device_type=device.type,
                                 dtype=torch.float32,
                                 enabled=True,
-                            ):'''
-                            # 生成假样本
-                            with torch.no_grad():
-                                fake_outputs = safe_tensor_operation(
-                                    model_cn,
-                                    batch_local_inputs,
-                                    batch_local_masks,
-                                    batch_global_inputs,
-                                    batch_global_masks,
+                            ):
+                                # nld_li, nldlt, nld_gi, nld_gt = nomarlize(batch_local_inputs, batch_local_targets, batch_global_inputs, batch_global_targets)
+                                # 生成假样本
+                                with torch.no_grad():
+                                    fake_outputs = safe_tensor_operation(
+                                        model_cn,
+                                        nld_li,
+                                        batch_local_masks,
+                                        nld_gi,
+                                        batch_global_masks,
+                                    )
+
+                                # 计算当前噪声水平 - 随着训练进展减少
+                                noise_level = max(
+                                    min_noise, start_noise * (1.0 - step / steps_2)
                                 )
 
-                            # 计算当前噪声水平 - 随着训练进展减少
-                            noise_level = max(
-                                min_noise, start_noise * (1.0 - step / steps_2)
-                            )
-
-                            # 应用实例噪声
-                            # 限制噪声水平在0-1之间
-                            noise_level = max(0.0, min(noise_level, 1.0))
-                            batch_local_targets_noisy = (
-                                batch_local_targets
-                                + torch.randn_like(batch_local_targets)
-                                * noise_level
-                            )
-                            fake_outputs_noisy = (
-                                fake_outputs
-                                + torch.randn_like(fake_outputs) * noise_level
-                            )
-
-                            # 嵌入假输出到全局
-                            fake_global_embedded, fake_global_mask_embedded, _ = (
-                                merge_local_to_global(
-                                    fake_outputs_noisy,
-                                    batch_global_inputs,
-                                    batch_global_masks,
-                                    metadata,
+                                # 应用实例噪声
+                                # 限制噪声水平在0-1之间
+                                noise_level = max(0.0, min(noise_level, 1.0))
+                                batch_local_targets_noisy = (
+                                    batch_local_targets
+                                    + torch.randn_like(batch_local_targets)
+                                    * noise_level
                                 )
-                            )
-
-                            # 嵌入真实输入到全局
-                            real_global_embedded, real_global_mask_embedded, _ = (
-                                merge_local_to_global(
-                                    batch_local_targets_noisy,
-                                    batch_global_inputs,
-                                    batch_global_masks,
-                                    metadata,
+                                fake_outputs_noisy = (
+                                    fake_outputs
+                                    + torch.randn_like(fake_outputs) * noise_level
                                 )
-                            )
 
-                            # 创建平滑标签
-                            batch_size = batch_local_targets.size(0)
-                            real_labels = (
-                                torch.ones(batch_size, 1).to(device) * 0.95
-                            )  # 标签平滑
-                            fake_labels = (
-                                torch.zeros(batch_size, 1).to(device) + 0.05
-                            )  # 标签平滑
-
-                            # 训练判别器处理假样本
-                            fake_predictions, fake_lf, fake_gf = (
-                                safe_tensor_operation(
-                                    model_cd,
-                                    fake_outputs_noisy,
-                                    batch_local_masks,
-                                    fake_global_embedded,
-                                    fake_global_mask_embedded,
+                                # 嵌入假输出到全局
+                                fake_global_embedded, fake_global_mask_embedded, _ = (
+                                    merge_local_to_global(
+                                        fake_outputs_noisy,
+                                        batch_global_inputs,
+                                        batch_global_masks,
+                                        metadata,
+                                    )
                                 )
-                            )
 
-                            # 训练判别器处理真实样本
-                            real_predictions, real_lf, real_gf = (
-                                safe_tensor_operation(
+                                # 嵌入真实输入到全局
+                                real_global_embedded, real_global_mask_embedded, _ = (
+                                    merge_local_to_global(
+                                        batch_local_targets_noisy,
+                                        batch_global_inputs,
+                                        batch_global_masks,
+                                        metadata,
+                                    )
+                                )
+
+                                # 创建平滑标签
+                                batch_size = batch_local_targets.size(0)
+                                real_labels = (
+                                    torch.ones(batch_size, 1).to(device) * 0.95
+                                )  # 标签平滑
+                                fake_labels = (
+                                    torch.zeros(batch_size, 1).to(device) + 0.05
+                                )  # 标签平滑
+
+                                # 训练判别器处理假样本
+                                fake_predictions, fake_lf, fake_gf = (
+                                    safe_tensor_operation(
+                                        model_cd,
+                                        fake_outputs_noisy,
+                                        batch_local_masks,
+                                        fake_global_embedded,
+                                        fake_global_mask_embedded,
+                                    )
+                                )
+
+                                # 训练判别器处理真实样本
+                                real_predictions, real_lf, real_gf = (
+                                    safe_tensor_operation(
+                                        model_cd,
+                                        batch_local_targets_noisy,
+                                        batch_local_masks,
+                                        real_global_embedded,
+                                        real_global_mask_embedded,
+                                    )
+                                )
+
+                                # 使用BCEWithLogitsLoss代替BCE或自定义损失
+                                loss_real = F.binary_cross_entropy_with_logits(
+                                    real_predictions, real_labels
+                                )
+                                loss_fake = F.binary_cross_entropy_with_logits(
+                                    fake_predictions, fake_labels
+                                )
+
+                                # 计算特征匹配损失
+                                fm_weight = 4
+                                fm_loss = (
+                                    feature_contrastive_loss(
+                                        real_lf,
+                                        real_gf,
+                                        fake_lf,
+                                        fake_gf,
+                                    )
+                                    * fm_weight
+                                )
+                                if fm_loss.mean()> loss_real.mean() and fm_loss.mean() > loss_fake.mean():
+                                    fm_loss*=1
+                                    # print("fm_loss weight reduced")
+                                lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
+                                r1_loss = r1_regularization(
                                     model_cd,
                                     batch_local_targets_noisy,
                                     batch_local_masks,
                                     real_global_embedded,
                                     real_global_mask_embedded,
                                 )
-                            )
 
-                            # 使用BCEWithLogitsLoss代替BCE或自定义损失
-                            loss_real = F.binary_cross_entropy_with_logits(
-                                real_predictions, real_labels
-                            )
-                            loss_fake = F.binary_cross_entropy_with_logits(
-                                fake_predictions, fake_labels
-                            )
+                                # 使用sigmoid计算预测概率，用于准确率计算
+                                with torch.no_grad():
+                                    real_probs = torch.sigmoid(real_predictions)
+                                    fake_probs = torch.sigmoid(fake_predictions)
 
-                            # 计算特征匹配损失
-                            fm_weight = 4
-                            fm_loss = (
-                                feature_contrastive_loss(
-                                    real_lf,
-                                    real_gf,
-                                    fake_lf,
-                                    fake_gf,
+                                    real_acc = (real_probs >= 0.5).float().mean().item()
+                                    fake_acc = (fake_probs < 0.5).float().mean().item()
+                                    avg_acc = (real_acc + fake_acc) / 2
+
+                                # 动态调整损失权重，平衡训练
+                                if real_acc < 0.1 and fake_acc > 0.9:
+                                    loss_real *= 5.0
+                                    loss_fake *= 0.5
+                                    print("loss real weight strengthened")
+                                elif fake_acc < 0.1 and real_acc > 0.9:
+                                    loss_real *= 0.5
+                                    loss_fake *= 5.0
+                                    print("loss fake weight strengthened")
+                                loss = (
+                                    loss_real + loss_fake + fm_loss + lsb_loss + r1_loss
                                 )
-                                * fm_weight
-                            )
-                            if fm_loss.mean()> loss_real.mean() and fm_loss.mean() > loss_fake.mean():
-                                fm_loss*=0.1
-                                print("fm_loss weight reduced")
-                            lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
-                            r1_loss = r1_regularization(
-                                model_cd,
-                                batch_local_targets_noisy,
-                                batch_local_masks,
-                                real_global_embedded,
-                                real_global_mask_embedded,
-                            )
-
-                            # 使用sigmoid计算预测概率，用于准确率计算
-                            with torch.no_grad():
-                                real_probs = torch.sigmoid(real_predictions)
-                                fake_probs = torch.sigmoid(fake_predictions)
-
-                                real_acc = (real_probs >= 0.5).float().mean().item()
-                                fake_acc = (fake_probs < 0.5).float().mean().item()
-                                avg_acc = (real_acc + fake_acc) / 2
-
-                            # 动态调整损失权重，平衡训练
-                            if real_acc < 0.1 and fake_acc > 0.9:
-                                loss_real *= 5.0
-                                loss_fake *= 0.5
-                                print("loss real weight strengthened")
-                            elif fake_acc < 0.1 and real_acc > 0.9:
-                                loss_real *= 0.5
-                                loss_fake *= 5.0
-                                print("loss fake weight strengthened")
-                            loss = (
-                                loss_real + loss_fake + fm_loss + lsb_loss + r1_loss
-                            )
 
                             # 使用梯度缩放器进行反向传播
-                            # scaler2.scale(loss).backward()
-                            loss.backward()
+                            scaler2.scale(loss).backward()
+                            # loss.backward()
 
                             # 梯度裁剪
-                            # scaler2.unscale_(opt_cd_p2)
+                            scaler2.unscale_(opt_cd_p2)
                             torch.nn.utils.clip_grad_norm_(
                                 model_cd.parameters(), max_norm=1.0
                             )
 
                             # 更新参数
-                            # scaler2.step(opt_cd_p2)
-                            opt_cd_p2.step()
-                            # scaler2.update()
+                            scaler2.step(opt_cd_p2)
+                            # opt_cd_p2.step()
+                            scaler2.update()
                             opt_cd_p2.zero_grad(set_to_none=True)
 
                             # 更新学习率 - 只使用调度器
@@ -3120,7 +3134,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # 更新进度条
                             current_lr = scheduler.get_last_lr()[0]
                             pbar.set_description(
-                                f"Phase 2 | loss: {loss.item():.4f}, R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, loss_real:{loss_real:.3f}, loss_fake:{loss_fake:.3f}, fm_loss:{fm_loss:.3f},lr: {current_lr:.1e}"
+                                f"Phase 2 | loss: {loss.item():.4f}, acc: {(real_acc+fake_acc)/2:.3f}, loss_rf:{(loss_real+loss_fake)/2:.3f}, lr: {current_lr:.1e}"
                             )
                             pbar.update(1)
 
@@ -4265,7 +4279,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch", type=int, default=8, help="batch size for training")
     parser.add_argument(
-        "--phase", type=int, default=2, help="training phase to start from (1, 2, or 3)"
+        "--phase", type=int, default=1, help="training phase to start from (1, 2, or 3)"
     )
     args = parser.parse_args()
     with visdom_server():

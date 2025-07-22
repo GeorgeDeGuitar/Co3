@@ -752,7 +752,7 @@ class DemDataset(Dataset):
                         float(id_val),
                     ]
                 )
-                ## 归一化
+                '''## 归一化
                 # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
                 global_min = id_array.min()
                 global_max = id_array.max()
@@ -769,7 +769,7 @@ class DemDataset(Dataset):
                     global_input = torch.full_like(global_input, 0.5)
                     local_input = torch.full_like(local_input, 0.5)
                     id_array = torch.full_like(id_array, 0.5)
-                    id_target = torch.full_like(id_target, 0.5)
+                    id_target = torch.full_like(id_target, 0.5)'''
 
                 fallback_data = (
                     torch.tensor(input_processed, dtype=torch.float32),
@@ -905,7 +905,7 @@ class DemDataset(Dataset):
                     ]
                 )
 
-                ## 归一化
+                '''## 归一化
                 # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
                 global_min = id_array.min()
                 global_max = id_array.max()
@@ -922,7 +922,7 @@ class DemDataset(Dataset):
                     global_input = torch.full_like(global_input, 0.5)
                     local_input = torch.full_like(local_input, 0.5)
                     id_array = torch.full_like(id_array, 0.5)
-                    id_target = torch.full_like(id_target, 0.5)
+                    id_target = torch.full_like(id_target, 0.5)'''
 
                 fallback_data = (
                     torch.tensor(input_processed, dtype=torch.float32),
@@ -1079,7 +1079,7 @@ class DemDataset(Dataset):
                 global_min = id_array.min()
                 global_max = id_array.max()
                 
-                # 避免除零错误
+                '''# 避免除零错误
                 if global_max - global_min > 1e-8:
                     # 归一化到[0, 1]
                     input_processed = (input_processed - global_min) / (global_max - global_min)
@@ -1102,7 +1102,7 @@ class DemDataset(Dataset):
                     torch.tensor(id_mask, dtype=torch.int),
                     torch.tensor(id_target, dtype=torch.float32),
                     metadata.astype(int),
-                )
+                )'''
 
             except Exception as e:
                 if retry == max_retries - 1:
@@ -1213,7 +1213,7 @@ class DemDataset(Dataset):
                 ]
             )
 
-            # 归一化
+            '''# 归一化
             # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
             global_min = id_array.min()
             global_max = id_array.max()
@@ -1230,7 +1230,7 @@ class DemDataset(Dataset):
                 global_input = torch.full_like(global_input, 0.5)
                 local_input = torch.full_like(local_input, 0.5)
                 modified_id_array = torch.full_like(modified_id_array, 0.5)
-                id_target = torch.full_like(id_target, 0.5)
+                id_target = torch.full_like(id_target, 0.5)'''
 
             return (
                 torch.tensor(input_target*processed_mask+processed_input*(1-processed_mask), dtype=torch.float32),
