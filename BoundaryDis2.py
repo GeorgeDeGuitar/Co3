@@ -74,26 +74,26 @@ class BoundaryQualityDiscriminator(nn.Module):
         quality_score = self.quality_evaluator(boundary_error_avg)"""
 
         loss_full, _ = self.loss(extracted_boundary, true_boundary)
-        loss_full = loss_full * 100
+        loss_full = loss_full * 10
         # loss_full = (1 - torch.exp(-loss_full * 50)) * 2
 
         # loss_mask, _ = self.loss(extracted_boundary * true_boundary, true_boundary)
         # loss_mask = torch.exp(-loss_mask * 50) * 0.5 * 0.2
         loss_mask, _ = self.loss(
-            extracted_boundary, torch.zeros_like(true_boundary)
+            extracted_boundary*true_boundary, torch.zeros_like(true_boundary)
         )
         # 除以mask=1的数量，再乘以mask整体值数量
-        '''mask_sum = true_boundary.sum()
+        mask_sum = true_boundary.sum()
         total_sum = true_boundary.numel()
         if mask_sum > 0:
             loss_mask = loss_mask / mask_sum * total_sum
         else:
             print("Warning: mask_sum is zero, loss_mask will be zero.")
-            loss_mask = loss_mask'''
+            loss_mask = loss_mask
         loss_mask = loss_mask*0.1
         # print(f"loss_full: {loss_full.item()}, loss_mask: {loss_mask.item()}")
 
-        return extracted_boundary, loss_full, loss_mask*0.1
+        return extracted_boundary, loss_full, loss_mask
 
 
 class AdaptiveBoundaryLoss(nn.Module):

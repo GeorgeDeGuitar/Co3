@@ -466,7 +466,7 @@ class EnhancedTerrainFeatureExtractor(nn.Module):
             plt.show()
         
         # 限制值范围，防止极值
-        # slope = torch.clamp(slope, min=0.0, max=10.0)
+        slope = torch.clamp(slope, min=0.0, max=10.0)
         # print(f"slope min: {slope.min().item():.4f}, max: {slope.max().item():.4f}, mean: {slope.mean().item():.4f}")
 
         ''' # 归一化坡度
@@ -658,8 +658,8 @@ class GlobalDiscriminator(nn.Module):
         x = torch.cat([terrain_features, mask], dim=1)
         
         # 应用空间注意力，重点关注有效区域
-        # attention = self.spatial_attention(x)
-        # x = x * attention
+        attention = self.spatial_attention(x)
+        x = x * attention
         
         # 创建下采样掩码进行跟踪
         current_mask = mask

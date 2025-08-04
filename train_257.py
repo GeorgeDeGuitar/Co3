@@ -21,12 +21,11 @@ from loss import completion_network_loss
 import torch.nn.functional as F
 
 # Import your models
-from models_ori import ContextDiscriminator  # models626
-from modelcn5 import CompletionNetwork
+from models_allsize import ContextDiscriminator, CompletionNetwork
 
 # Import your custom dataset
 ## from DemDataset1 import DemDataset
-from DemDataset3 import DemDataset, fast_collate_fn
+from fastdatageneration import PreGeneratedMaskDataset
 
 # from DEMData import DEMData
 
@@ -36,7 +35,7 @@ from DemDataset3 import DemDataset, fast_collate_fn
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from BoundaryDis2 import BoundaryQualityDiscriminator
+from BoundaryDis import BoundaryQualityDiscriminator
 
 import random
 import gc
@@ -182,6 +181,7 @@ def safe_tensor_operation(func, *args, **kwargs):
 
 # setx PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:98
 
+
 def save_checkpoint(
     model_cn,
     model_cd,
@@ -198,7 +198,7 @@ def save_checkpoint(
     cd_lr=None,
     bqd_lr=None,
     schedulers=None,  # 新增
-    scalers=None,     # 新增
+    scalers=None,  # 新增
     stability_tracker=None,  # 新增
 ):
     """完整的检查点保存"""
@@ -208,7 +208,7 @@ def save_checkpoint(
             if model is None:
                 return None
             # 如果是DataParallel包装的模型，使用.module获取原始模型
-            if hasattr(model, 'module'):
+            if hasattr(model, "module"):
                 return model.module.state_dict()
             else:
                 return model.state_dict()
@@ -218,12 +218,10 @@ def save_checkpoint(
             "model_cn_state_dict": get_model_state_dict(model_cn),
             "model_cd_state_dict": get_model_state_dict(model_cd),
             "model_bqd_state_dict": get_model_state_dict(model_bqd),
-            
             # 优化器状态
             "opt_cn_state_dict": opt_cn.state_dict() if opt_cn is not None else None,
             "opt_cd_state_dict": opt_cd.state_dict() if opt_cd is not None else None,
             "opt_bqd_state_dict": opt_bqd.state_dict() if opt_bqd is not None else None,
-            
             # 训练状态
             "step": step,
             "phase": phase,
@@ -232,33 +230,32 @@ def save_checkpoint(
             "cn_lr": cn_lr,
             "cd_lr": cd_lr,
             "bqd_lr": bqd_lr,
-            
             # 随机数状态
             "torch_rng_state": torch.get_rng_state(),
             "numpy_rng_state": np.random.get_state(),
             "python_rng_state": random.getstate(),  # 添加Python random状态
-            
             # CUDA随机数状态
-            "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            
+            "cuda_rng_state": (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            ),
             # 学习率调度器状态
             "schedulers": {},
             "scalers": {},
             "stability_tracker": None,
         }
-        
+
         # 保存调度器状态
         if schedulers:
             for name, scheduler in schedulers.items():
                 if scheduler is not None:
                     checkpoint["schedulers"][name] = scheduler.state_dict()
-        
-        # 保存缩放器状态  
+
+        # 保存缩放器状态
         if scalers:
             for name, scaler in scalers.items():
                 if scaler is not None:
                     checkpoint["scalers"][name] = scaler.state_dict()
-        
+
         # 保存稳定性追踪器
         if stability_tracker is not None:
             checkpoint["stability_tracker"] = {
@@ -384,36 +381,46 @@ def cleanup_old_checkpoints(result_dir, current_phase, current_step, keep_count=
 
 
 def load_checkpoint(
-    checkpoint_path, model_cn, model_cd, model_bqd, opt_cn, opt_cd, opt_bqd, device,
-    schedulers=None, scalers=None
+    checkpoint_path,
+    model_cn,
+    model_cd,
+    model_bqd,
+    opt_cn,
+    opt_cd,
+    opt_bqd,
+    device,
+    schedulers=None,
+    scalers=None,
 ):
     """完整的检查点加载"""
     try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        
+        checkpoint = torch.load(
+            checkpoint_path, map_location=device, weights_only=False
+        )
+
         # 处理多GPU模型的state_dict加载
         def load_model_state_dict(model, state_dict_key):
             if model is None or checkpoint.get(state_dict_key) is None:
                 return
-            
+
             state_dict = checkpoint[state_dict_key]
-            
+
             # 处理DataParallel模型
-            if hasattr(model, 'module'):
+            if hasattr(model, "module"):
                 # 当前是DataParallel，检查state_dict是否有'module.'前缀
                 sample_key = list(state_dict.keys())[0]
-                if not sample_key.startswith('module.'):
+                if not sample_key.startswith("module."):
                     # state_dict没有'module.'前缀，需要添加
                     new_state_dict = {}
                     for k, v in state_dict.items():
-                        new_state_dict['module.' + k] = v
+                        new_state_dict["module." + k] = v
                     model.load_state_dict(new_state_dict)
                 else:
                     model.load_state_dict(state_dict)
             else:
                 # 当前不是DataParallel，检查state_dict是否有'module.'前缀
                 sample_key = list(state_dict.keys())[0]
-                if sample_key.startswith('module.'):
+                if sample_key.startswith("module."):
                     # state_dict有'module.'前缀，需要移除
                     new_state_dict = {}
                     for k, v in state_dict.items():
@@ -421,12 +428,12 @@ def load_checkpoint(
                     model.load_state_dict(new_state_dict)
                 else:
                     model.load_state_dict(state_dict)
-        
+
         # 加载模型
         load_model_state_dict(model_cn, "model_cn_state_dict")
-        load_model_state_dict(model_cd, "model_cd_state_dict") 
+        load_model_state_dict(model_cd, "model_cd_state_dict")
         load_model_state_dict(model_bqd, "model_bqd_state_dict")
-        
+
         # 加载优化器
         if opt_cn and checkpoint.get("opt_cn_state_dict"):
             opt_cn.load_state_dict(checkpoint["opt_cn_state_dict"])
@@ -434,29 +441,29 @@ def load_checkpoint(
             opt_cd.load_state_dict(checkpoint["opt_cd_state_dict"])
         if opt_bqd and checkpoint.get("opt_bqd_state_dict"):
             opt_bqd.load_state_dict(checkpoint["opt_bqd_state_dict"])
-        
+
         # 恢复随机数状态
-        '''if "torch_rng_state" in checkpoint:
+        """if "torch_rng_state" in checkpoint:
             torch.set_rng_state(checkpoint["torch_rng_state"])
         if "numpy_rng_state" in checkpoint:
             np.random.set_state(checkpoint["numpy_rng_state"])
         if "python_rng_state" in checkpoint:
             random.setstate(checkpoint["python_rng_state"])
         if "cuda_rng_state" in checkpoint and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])'''
-        
+            torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])"""
+
         # 恢复调度器状态
         if schedulers and "schedulers" in checkpoint:
             for name, scheduler in schedulers.items():
                 if scheduler is not None and name in checkpoint["schedulers"]:
                     scheduler.load_state_dict(checkpoint["schedulers"][name])
-        
+
         # 恢复缩放器状态
         if scalers and "scalers" in checkpoint:
             for name, scaler in scalers.items():
                 if scaler is not None and name in checkpoint["scalers"]:
                     scaler.load_state_dict(checkpoint["scalers"][name])
-        
+
         # 恢复稳定性追踪器
         stability_tracker = None
         if "stability_tracker" in checkpoint and checkpoint["stability_tracker"]:
@@ -467,7 +474,7 @@ def load_checkpoint(
             stability_tracker.recon_loss_ema = st_data["recon_loss_ema"]
             stability_tracker.alpha = st_data.get("alpha", 0.95)
             stability_tracker.recovery_steps = st_data.get("recovery_steps", 0)
-        
+
         # 提取其他信息
         step = checkpoint["step"]
         phase = checkpoint["phase"]
@@ -476,11 +483,20 @@ def load_checkpoint(
         cn_lr = checkpoint.get("cn_lr", None)
         cd_lr = checkpoint.get("cd_lr", None)
         bqd_lr = checkpoint.get("bqd_lr", None)
-        
+
         print(f"成功恢复检查点：阶段 {phase}，步骤 {step}")
         print(f"随机数状态已恢复")
-        
-        return step, phase, best_val_loss, best_acc, cn_lr, cd_lr, bqd_lr, stability_tracker
+
+        return (
+            step,
+            phase,
+            best_val_loss,
+            best_acc,
+            cn_lr,
+            cd_lr,
+            bqd_lr,
+            stability_tracker,
+        )
 
     except Exception as e:
         print(f"加载检查点失败: {e}")
@@ -498,6 +514,7 @@ def ensure_scalar_loss(loss):
             return loss
     else:
         return loss
+
 
 def prepare_batch_data(batch, device):
     """
@@ -824,12 +841,13 @@ def safe_tensor_float(tensor_or_tuple):
             f"Expected tensor or tuple containing tensor, got {type(tensor)}"
         )
 
+
 def nomarlize(local_inputs, local_targets, global_inputs, global_targets):
     ## 归一化
     # 基于global_input的数据范围进行归一化（已经用均值填充，无需考虑mask）
     global_min = global_inputs.min()
     global_max = global_inputs.max()
-    
+
     # 避免除零错误
     if global_max - global_min > 1e-8:
         # 归一化到[0, 1]
@@ -855,12 +873,14 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
         array_dir = (
             r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\array"  # 全局array
         )
-        mask_dir = r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\mask"  # 全局mask
+        mask_dir = (
+            r"E:\KingCrimson Dataset\Simulate\data0\arraynmask_a\mask"  # 全局mask
+        )
         target_dir = r"E:\KingCrimson Dataset\Simulate\data0\groundtruthstatus\statusarray"  # 全局target
         result_dir = rf"E:\KingCrimson Dataset\Simulate\data0\{dir}"  # 结果保存路径
 
         # Training parameters
-        steps_1 = 100000 # 160000  # Phase 1 training steps
+        steps_1 = 100000  # 160000  # Phase 1 training steps
         steps_2 = 80000  # Phase 2 training steps
         steps_3 = 200000  # Phase 3 training steps
 
@@ -902,7 +922,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
             print(f"Visdom初始化失败: {e}")
             viz = None
 
-        
         # =================================================
         # Preparation
         # =================================================
@@ -915,170 +934,122 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
         cleanup_memory()
 
-        # Load dataset with error handling
-        """try:
-            dataset = DemDataset(json_dir, array_dir, mask_dir, target_dir,min_valid_pixels=20, max_valid_pixels=900)
-            full_dataset = dataset
-        except Exception as e:
-            print(f"加载数据集失败: {e}")
-            raise"""
+        size = 257
 
-        # Split dataset into train and validation
-        """dataset_size = len(full_dataset)
-        val_size = int(validation_split * dataset_size)
-        train_size = dataset_size - val_size
+        # 数据集参数配置
+        reference_dir = r"e:\KingCrimson Dataset\Simulate\data0\ST2\statusarray"  # 参考数据目录
+        mask_cache_dir = "./mask_cache_257"  # mask缓存目录
+        local_sizes = [size]  # 支持多种局部尺寸
+        samples_per_file = 20  # 每个文件生成的样本数
+        global_coverage_range = (0.5, 1.0)  # 全局覆盖率范围
+        local_missing_range = (0.3, 0.7)  # 局部缺失率范围
+        num_global_masks = 500  # 全局mask模板数量
+        num_local_masks = 500  # 局部mask模板数量
+        batch_size = 8  # 批次大小
+        validation_split = 0.1  # 验证集比例
 
-        train_dataset, val_dataset = random_split(
-            full_dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42),
-        )"""
-
-        """# Create data loaders with optimized settings
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True, 
-            collate_fn=custom_collate_fn,
-            num_workers=2,
-            pin_memory=True,
-            persistent_workers=True,  # 保持worker进程
-            prefetch_factor=2,       # 预取因子
-        )
-
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=batch_size, 
-            shuffle=True, 
-            collate_fn=custom_collate_fn,
-            num_workers=2,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
-        )
-        
-        # 创建验证子集
-        val_indices = np.random.choice(len(val_loader.dataset), size=50, replace=False)
-        val_subset = torch.utils.data.Subset(val_loader.dataset, val_indices)
-        val_subset_loader = DataLoader(
-            val_subset, 
-            batch_size=batch_size, 
-            shuffle=True, 
-            collate_fn=custom_collate_fn, 
-            num_workers=2, 
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
-        )
-        
-        # 测试集加载器（训练时不使用，只在最终评估时用）
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-            num_workers=2,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
-        )"""
-        # Load dataset with error handling
+        # 创建数据集
+        print("🚀 加载预生成mask数据集...")
         try:
-            dataset = DemDataset(
-                json_dir,
-                array_dir,
-                mask_dir,
-                target_dir,
-                min_valid_pixels=20,
-                max_valid_pixels=900,
-                enable_synthetic_masks=True,  # 启用生成式mask
-                synthetic_ratio=1.0,  # 每个原始数据生成1个合成数据
-                analyze_data=False,  # 分析数据质量
+            dataset = PreGeneratedMaskDataset(
+                reference_dir=reference_dir,
+                mask_cache_dir=mask_cache_dir,
+                local_sizes=local_sizes,
+                samples_per_file=samples_per_file,
+                global_coverage_range=global_coverage_range,
+                local_missing_range=local_missing_range,
+                num_global_masks=num_global_masks,
+                num_local_masks=num_local_masks,
+                regenerate_masks=False,  # 使用已有的预生成mask
+                seed=42,
+                cache_reference_files=True,
+                visualization_samples=0,
+                enable_edge_connection=True,  # 启用边缘连接
             )
             full_dataset = dataset
-            print(f"数据集加载成功，总数据量: {len(full_dataset)}")
-            print(f"  - 原始数据: {dataset.original_length}")
-            if dataset.enable_synthetic_masks:
-                print(f"  - 生成式数据: {dataset.synthetic_length}")
+            print(f"✅ 数据集加载成功!")
+            print(f"   总样本数: {len(full_dataset)}")
+            print(f"   Global masks: {len(dataset.global_masks)}")
+            print(f"   Local masks数量:")
+            for size in local_sizes:
+                if size in dataset.local_masks:
+                    print(f"     {size}x{size}: {len(dataset.local_masks[size])}")
         except Exception as e:
-            print(f"加载数据集失败: {e}")
+            print(f"❌ 加载数据集失败: {e}")
             raise
 
-        # ==================== 简洁的数据分割（仅需这几行）====================
-        train_dataset, val_dataset, test_dataset = simple_dataset_split(
-            full_dataset,
-            test_ratio=0.1,  # 10% 测试集
-            val_ratio=0.1,  # 25% 验证集（从剩余90%中取）
-            seed=42,  # 固定种子确保可重现
-        )
-
-        """# Split dataset into train and validation
+        # 分割数据集
         dataset_size = len(full_dataset)
         val_size = int(validation_split * dataset_size)
         train_size = dataset_size - val_size
 
-        train_dataset, val_dataset = random_split(
-            full_dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42),
-        )"""
+        print(f"\n📊 数据集分割:")
+        print(f"   总数据量: {dataset_size}")
+        print(f"   训练集: {train_size} ({100*(1-validation_split):.0f}%)")
+        print(f"   验证集: {val_size} ({100*validation_split:.0f}%)")
 
-        # Create data loaders with optimized settings
+        # 使用固定种子确保可重现性
+        generator = torch.Generator().manual_seed(42)
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size], generator=generator
+        )
+
+        # 创建训练数据加载器
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True,
-            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            shuffle=True,  # 启用shuffle
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
+            drop_last=True,  # 丢弃最后不完整的批次
         )
 
+        # 创建验证数据加载器
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,
-            shuffle=True,
-            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            shuffle=True,  # 启用shuffle
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
+            drop_last=False,
         )
 
-        # 创建验证子集
-        val_indices = np.random.choice(len(val_loader.dataset), size=100, replace=False)
-        val_subset = torch.utils.data.Subset(val_loader.dataset, val_indices)
+        # 创建验证子集（用于快速验证）
+        val_subset_size = min(100, len(val_dataset))
+        val_indices = np.random.choice(
+            len(val_dataset), size=val_subset_size, replace=False
+        )
+        val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+
         val_subset_loader = DataLoader(
             val_subset,
             batch_size=batch_size,
-            shuffle=True,
-            collate_fn=fast_collate_fn,  # 使用优化的collate函数
+            shuffle=True,  # 启用shuffle
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
+            drop_last=False,
         )
-
-        print(f"Training dataset size: {len(train_dataset)}")
-        print(f"Validation dataset size: {len(val_dataset)}")
-
-        alpha = torch.tensor(alpha, dtype=torch.float32).to(device)
 
         # =================================================
         # Setup Models
         # =================================================
         # Initialize models with error handling
         try:
-            model_cn = CompletionNetwork(input_channels=1).to(device)
+            model_cn = CompletionNetwork(input_channels=1, local_size = size).to(device)
             model_cd = ContextDiscriminator(
                 local_input_channels=1,
-                local_input_size=33,
+                local_input_size=size,
                 global_input_channels=1,
                 global_input_size=600,
             ).to(device)
             model_bqd = BoundaryQualityDiscriminator(
-                input_channels=1, input_size=33
+                input_channels=1, input_size=size
             ).to(device)
             model_cn = model_cn.float()
             model_cd = model_cd.float()
@@ -1141,73 +1112,94 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 schedulers_dict = None
                 scalers_dict = None
                 loaded_stability_tracker = None
-                
+
                 # 首次加载获取基本信息
-                step, phase, best_val_loss, best_acc, cn_lr, cd_lr, bqd_lr, loaded_stability_tracker = (
-                    load_checkpoint(
-                        resume_from,
-                        model_cn,
-                        model_cd,
-                        model_bqd,
-                        None,  # 先不加载优化器，根据phase决定
-                        None,
-                        None,
-                        device,
-                    )
+                (
+                    step,
+                    phase,
+                    best_val_loss,
+                    best_acc,
+                    cn_lr,
+                    cd_lr,
+                    bqd_lr,
+                    loaded_stability_tracker,
+                ) = load_checkpoint(
+                    resume_from,
+                    model_cn,
+                    model_cd,
+                    model_bqd,
+                    None,  # 先不加载优化器，根据phase决定
+                    None,
+                    None,
+                    device,
                 )
-                
+
                 print(f"检查点信息: 阶段={phase}, 步骤={step}")
-                
+
                 # 根据加载的阶段设置相应的训练状态
                 if phase == 1:
                     print("恢复Phase 1训练状态...")
                     # 重新加载，使用正确的优化器
-                    step, phase, best_val_loss, best_acc, cn_lr, cd_lr, bqd_lr, loaded_stability_tracker = (
-                        load_checkpoint(
-                            resume_from,
-                            model_cn,
-                            model_cd, 
-                            model_bqd,
-                            opt_cn_p1,  # Phase 1使用的优化器
-                            None,       # Phase 1不使用CD优化器
-                            opt_bqd,
-                            device,
-                            schedulers=None,  # Phase 1通常不使用调度器
-                            scalers=None,
-                        )
+                    (
+                        step,
+                        phase,
+                        best_val_loss,
+                        best_acc,
+                        cn_lr,
+                        cd_lr,
+                        bqd_lr,
+                        loaded_stability_tracker,
+                    ) = load_checkpoint(
+                        resume_from,
+                        model_cn,
+                        model_cd,
+                        model_bqd,
+                        opt_cn_p1,  # Phase 1使用的优化器
+                        None,  # Phase 1不使用CD优化器
+                        opt_bqd,
+                        device,
+                        schedulers=None,  # Phase 1通常不使用调度器
+                        scalers=None,
                     )
-                    
+
                     step_phase1 = step
                     step_phase2 = 0
                     step_phase3 = 0
                     # best_val_loss保持加载的值
-                    
+
                 elif phase == 2:
                     print("恢复Phase 2训练状态...")
                     # Phase 2完成后切换到Phase 3的优化器设置
-                    step, phase, best_val_loss, best_acc, cn_lr, cd_lr, bqd_lr, loaded_stability_tracker = (
-                        load_checkpoint(
-                            resume_from,
-                            model_cn,
-                            model_cd,
-                            model_bqd,
-                            opt_cn_p1,    # 保持Phase 1的CN优化器
-                            opt_cd_p2,    # Phase 2的CD优化器
-                            opt_bqd,
-                            device,
-                            schedulers=None,  # Phase 2的调度器
-                            scalers=None,
-                        )
+                    (
+                        step,
+                        phase,
+                        best_val_loss,
+                        best_acc,
+                        cn_lr,
+                        cd_lr,
+                        bqd_lr,
+                        loaded_stability_tracker,
+                    ) = load_checkpoint(
+                        resume_from,
+                        model_cn,
+                        model_cd,
+                        model_bqd,
+                        opt_cn_p1,  # 保持Phase 1的CN优化器
+                        opt_cd_p2,  # Phase 2的CD优化器
+                        opt_bqd,
+                        device,
+                        schedulers=None,  # Phase 2的调度器
+                        scalers=None,
                     )
-                    
+
                     step_phase1 = steps_1
                     step_phase2 = step
                     step_phase3 = 0
                     # best_acc保持加载的值
-                    
+
                 elif phase == 3:
                     print("恢复Phase 3训练状态...")
-                    
+
                     # Phase 3需要初始化调度器和缩放器
                     # 注意：这些变量在Phase 3代码中才会创建，这里需要先创建
                     scheduler_cn = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1216,72 +1208,66 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     scheduler_cd = torch.optim.lr_scheduler.ReduceLROnPlateau(
                         opt_cd_p3, mode="max", factor=0.7, patience=5, min_lr=1e-7
                     )
-                    
-                    scaler_cn = GradScaler(enabled=True, init_scale=2**10, growth_interval=2000)
-                    scaler_cd = GradScaler(enabled=True, init_scale=2**10, growth_interval=2000)
+
+                    scaler_cn = GradScaler(
+                        enabled=True, init_scale=2**10, growth_interval=2000
+                    )
+                    scaler_cd = GradScaler(
+                        enabled=True, init_scale=2**10, growth_interval=2000
+                    )
                     scaler_bqd_p3 = GradScaler()
-                    
+
                     # 准备调度器和缩放器字典
-                    schedulers_dict = {
-                        "cn": scheduler_cn,
-                        "cd": scheduler_cd
-                    }
+                    schedulers_dict = {"cn": scheduler_cn, "cd": scheduler_cd}
                     scalers_dict = {
                         "cn": scaler_cn,
                         "cd": scaler_cd,
-                        "bqd": scaler_bqd_p3
+                        "bqd": scaler_bqd_p3,
                     }
-                    
+
                     # 重新加载，包含完整的状态
-                    step, phase, best_val_loss, best_acc, cn_lr, cd_lr, bqd_lr, loaded_stability_tracker = (
-                        load_checkpoint(
-                            resume_from,
-                            model_cn,
-                            model_cd,
-                            model_bqd,
-                            opt_cn_p3,    # Phase 3的CN优化器
-                            opt_cd_p3,    # Phase 3的CD优化器
-                            opt_bqd,
-                            device,
-                            schedulers=schedulers_dict,
-                            scalers=scalers_dict,
-                        )
+                    (
+                        step,
+                        phase,
+                        best_val_loss,
+                        best_acc,
+                        cn_lr,
+                        cd_lr,
+                        bqd_lr,
+                        loaded_stability_tracker,
+                    ) = load_checkpoint(
+                        resume_from,
+                        model_cn,
+                        model_cd,
+                        model_bqd,
+                        opt_cn_p3,  # Phase 3的CN优化器
+                        opt_cd_p3,  # Phase 3的CD优化器
+                        opt_bqd,
+                        device,
+                        schedulers=schedulers_dict,
+                        scalers=scalers_dict,
                     )
 
-                    pretrained_weights_path_cn = r"e:\KingCrimson Dataset\Simulate\data0\results28\phase_3\model_cd_best_2025_7_25_17_59"
-                    if os.path.exists(pretrained_weights_path_cn):
-                        try:
-                            model_cn.load_state_dict(
-                                torch.load(
-                                    pretrained_weights_path_cn,
-                                    map_location=device,
-                                    weights_only=True,
-                                )
-                            )
-                            print(
-                                f"Phase3: Loaded pre-trained weights from {pretrained_weights_path_cn}"
-                            )
-                        except Exception as e:
-                            print(f"加载CN预训练权重失败: {e}")
-                    
                     step_phase1 = steps_1
-                    step_phase2 = steps_2  
+                    step_phase2 = steps_2
                     step_phase3 = step
                     best_val_loss_joint = best_val_loss
-                    
+
                     # 恢复稳定性追踪器
                     if loaded_stability_tracker:
                         stability_tracker = loaded_stability_tracker
-                        print(f"恢复稳定性追踪器: 真实准确率EMA={stability_tracker.real_acc_ema:.3f}, "
-                            f"假样本准确率EMA={stability_tracker.fake_acc_ema:.3f}")
+                        print(
+                            f"恢复稳定性追踪器: 真实准确率EMA={stability_tracker.real_acc_ema:.3f}, "
+                            f"假样本准确率EMA={stability_tracker.fake_acc_ema:.3f}"
+                        )
                     else:
                         # 如果没有保存的追踪器，创建新的
                         stability_tracker = StabilityTracker()
                         print("创建新的稳定性追踪器")
-                
+
                 else:
                     raise ValueError(f"未知的训练阶段: {phase}")
-                
+
                 # 应用学习率（如果检查点中保存了的话）
                 if cn_lr is not None and phase in [1, 3]:
                     if phase == 1:
@@ -1290,7 +1276,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     elif phase == 3:
                         opt_cn_p3.param_groups[0]["lr"] = cn_lr
                         print(f"恢复Phase 3 CN学习率: {cn_lr}")
-                        
+
                 if cd_lr is not None and phase in [2, 3]:
                     if phase == 2:
                         opt_cd_p2.param_groups[0]["lr"] = cd_lr
@@ -1298,15 +1284,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     elif phase == 3:
                         opt_cd_p3.param_groups[0]["lr"] = cd_lr
                         print(f"恢复Phase 3 CD学习率: {cd_lr}")
-                        
+
                 if bqd_lr is not None:
                     opt_bqd.param_groups[0]["lr"] = bqd_lr
                     print(f"恢复BQD学习率: {bqd_lr}")
-                
+
                 print(f"✅ 成功恢复训练状态:")
                 print(f"   当前阶段: {phase}")
                 print(f"   Phase 1 步骤: {step_phase1}")
-                print(f"   Phase 2 步骤: {step_phase2}")  
+                print(f"   Phase 2 步骤: {step_phase2}")
                 print(f"   Phase 3 步骤: {step_phase3}")
                 # 安全地显示最佳值
                 if best_val_loss is not None and best_val_loss != float("inf"):
@@ -1328,14 +1314,14 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     print("   -> 将继续Phase 3训练（联合对抗训练）")
                     if loaded_stability_tracker:
                         print(f"   -> 稳定性追踪器已恢复")
-                
+
             except Exception as e:
                 print(f"❌ 加载检查点失败: {e}")
                 print("将从头开始训练...")
                 # 重置所有训练状态
                 phase = Phase  # 使用命令行参数指定的阶段
                 step_phase1 = 0
-                step_phase2 = 0  
+                step_phase2 = 0
                 step_phase3 = 0
                 best_val_loss = float("inf")
                 best_bqd_loss = float("inf")
@@ -1347,7 +1333,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 cleanup_memory()
                 raise
         else:
-            step=0
+            step = 0
             if phase == 1:
                 """pretrained_weights_path = r"E:\KingCrimson Dataset\Simulate\data0\results18\phase_1\model_cn_step26500"
                 if os.path.exists(pretrained_weights_path):
@@ -1359,7 +1345,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
             if phase == 2:
                 # Load pre-trained weights if available
-                pretrained_weights_path = r"e:\KingCrimson Dataset\Simulate\data0\results25\phase_1\model_cn_step160000"
+                pretrained_weights_path = r"e:\KingCrimson Dataset\Simulate\data0\results29\phase_1\model_cn_step100000"
                 if os.path.exists(pretrained_weights_path):
                     try:
                         model_cn.load_state_dict(
@@ -1374,9 +1360,24 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         )
                     except Exception as e:
                         print(f"加载预训练权重失败: {e}")
+                pretrained_weights_path_bqd = r"e:\KingCrimson Dataset\Simulate\data0\results29\bqd\model_bqd_step100000"
+                if os.path.exists(pretrained_weights_path_bqd):
+                    try:
+                        model_bqd.load_state_dict(
+                            torch.load(
+                                pretrained_weights_path_bqd,
+                                map_location=device,
+                                weights_only=True,
+                            )
+                        )
+                        print(
+                            f"Phase3: Loaded pre-trained weights from {pretrained_weights_path_bqd}"
+                        )
+                    except Exception as e:
+                        print(f"加载CD预训练权重失败: {e}")
             elif phase == 3:
                 # Load pre-trained weights if available
-                pretrained_weights_path_cn = r"e:\KingCrimson Dataset\Simulate\data0\results34\phase_1\model_cn_step100000"
+                pretrained_weights_path_cn = r"e:\KingCrimson Dataset\Simulate\data0\results32\phase_1\model_cn_step100000"
                 if os.path.exists(pretrained_weights_path_cn):
                     try:
                         model_cn.load_state_dict(
@@ -1392,7 +1393,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CN预训练权重失败: {e}")
 
-                pretrained_weights_path_cd = r"e:\KingCrimson Dataset\Simulate\data0\results26\phase_2\model_cd_step64500"
+                pretrained_weights_path_cd = r"e:\KingCrimson Dataset\Simulate\data0\results29\phase_3\model_cd_best_2025_7_26_23_22"
                 if os.path.exists(pretrained_weights_path_cd):
                     try:
                         model_cd.load_state_dict(
@@ -1408,7 +1409,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     except Exception as e:
                         print(f"加载CD预训练权重失败: {e}")
 
-                pretrained_weights_path_bqd = r"e:\KingCrimson Dataset\Simulate\data0\results34\bqd\model_bqd_step100000"
+                pretrained_weights_path_bqd = r"e:\KingCrimson Dataset\Simulate\data0\results32\bqd\model_bqd_step100000"
                 if os.path.exists(pretrained_weights_path_bqd):
                     try:
                         model_bqd.load_state_dict(
@@ -1518,7 +1519,6 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 print(f"创建Visdom窗口失败: {e}")
                 traceback.print_exc()  # 打印详细的错误堆栈信息
                 loss_windows = {}
-
 
         # 在批次大小配置部分
         if use_multi_gpu:
@@ -1685,12 +1685,14 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 if edge_inputs is not None and edge_outputs is not None:
                     num_edge = min(num_samples, len(edge_inputs), len(edge_outputs))
                     # 检查是否有edge_targets
-                    has_edge_targets = edge_targets is not None and len(edge_targets) >= num_edge
-                    
+                    has_edge_targets = (
+                        edge_targets is not None and len(edge_targets) >= num_edge
+                    )
+
                     colored_edge_in = []
                     colored_edge_out = []
                     colored_edge_target = []
-                    
+
                     # 生成灰度图像
                     for i in range(num_edge):
                         colored_edge_in.append(
@@ -1703,57 +1705,61 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             colored_edge_target.append(
                                 apply_colormap(edge_targets[i], grayscale=True)
                             )
-                    
+
                     # 创建3行num_edge列的网格，第一行为in，第二行为out，第三行为target
                     edge_width = colored_edge_in[0].width
                     edge_height = colored_edge_in[0].height
                     gap_size = 5
                     gray_value = 128  # 中等灰度值 (0-255范围)
-                    
+
                     edge_grid_width = (edge_width + gap_size) * num_edge
-                    edge_grid_height = (edge_height + gap_size) * (3 if has_edge_targets else 2)
-                    
+                    edge_grid_height = (edge_height + gap_size) * (
+                        3 if has_edge_targets else 2
+                    )
+
                     # 创建灰度图网格，使用灰色背景
-                    edge_grid_img = Image.new("L", (edge_grid_width, edge_grid_height), color=gray_value)
-                    
+                    edge_grid_img = Image.new(
+                        "L", (edge_grid_width, edge_grid_height), color=gray_value
+                    )
+
                     # 第一行: edge_inputs
                     for i in range(num_edge):
                         x = i * (edge_width + gap_size)
                         y = 0
                         edge_grid_img.paste(colored_edge_target[i], (x, y))
-                    
+
                     # 第二行: edge_outputs
                     for i in range(num_edge):
                         x = i * (edge_width + gap_size)
                         y = edge_height + gap_size
                         edge_grid_img.paste(colored_edge_in[i], (x, y))
-                    
+
                     # 第三行: edge_targets (如果存在)
                     if has_edge_targets:
                         for i in range(num_edge):
                             x = i * (edge_width + gap_size)
                             y = (edge_height + gap_size) * 2
                             edge_grid_img.paste(colored_edge_out[i], (x, y))
-                    
+
                     # 放大和local_inputs一样
                     edge_grid_img = edge_grid_img.resize(
                         (edge_grid_img.width * 3, edge_grid_img.height * 3),
                         Image.NEAREST,
                     )
-                    
+
                     # 转换为numpy数组时需要注意灰度图的处理
                     edge_array = np.array(edge_grid_img)
                     # 灰度图需要添加通道维度给Visdom
                     if edge_array.ndim == 2:
                         edge_array = edge_array[np.newaxis, :, :]  # 添加通道维度
-                    
+
                     # 构建caption，根据是否有targets调整
                     caption_text = f"{phase} edge extraction step {step}"
                     if has_edge_targets:
                         caption_text += " (Input/Output/Target)"
                     else:
                         caption_text += " (Input/Output)"
-                    
+
                     viz.image(
                         edge_array,
                         opts=dict(
@@ -1762,7 +1768,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                         ),
                         win=f"{phase}_edge_compare",
                     )
-                    
+
                     # 清理edge相关变量
                     del colored_edge_in, colored_edge_out
                     if has_edge_targets:
@@ -1832,17 +1838,22 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             )
                             val_loss += loss.item()
 
-                            nld_li = normalization(batch_local_inputs, batch_global_inputs)
-                            nld_lo = normalization(outputs, batch_global_inputs)
-                            nld_lt = normalization(batch_local_targets, batch_global_inputs)
-
-                            output1, loss1, _ = model_bqd(
-                                nld_li, batch_local_masks
+                            nld_li = normalization(
+                                batch_local_inputs, batch_global_inputs
                             )
+                            nld_lo = normalization(outputs, batch_global_inputs)
+                            nld_lt = normalization(
+                                batch_local_targets, batch_global_inputs
+                            )
+
+                            output1, loss1, _ = model_bqd(nld_li, batch_local_masks)
                             output2, loss2, loss2_mask = model_bqd(
                                 nld_lo, batch_local_masks
                             )
-                            output3, _, _ = model_bqd(nld_lt, torch.zeros_like(outputs))
+                            nld_lt = nld_lt.unsqueeze(1)
+                            # print(f"local size: {nld_li.size()}, mask size: {torch.zeros_like(outputs).size()}")
+                            # print(f"nld_lt size: {nld_lt.size()}, nld_lo size: {nld_lo.size()}")
+                            output3, _, _ = model_bqd(nld_lt, torch.zeros_like(nld_lt))
                             loss_bqd = (loss1 + loss2) / 2
                             val_bqd_loss += loss_bqd.item()
                             val_loss += loss2_mask.item()
@@ -1866,6 +1877,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                         except Exception as e:
                             print(f"验证批次处理失败: {e}")
+                            traceback.print_exc()  # 打印详细的错误堆栈信息
                             cleanup_memory()
                             continue
 
@@ -1960,9 +1972,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             fake_labels = torch.zeros(batch_size, 1, device=device)
 
                             nld_o = normalization(outputs, batch_global_inputs)
-                            _, _, mask_loss = model_bqd(
-                                nld_o, batch_local_masks
-                            )
+                            _, _, mask_loss = model_bqd(nld_o, batch_local_masks)
                             mask_loss = ensure_scalar_loss(mask_loss)
                             bqd_loss_sum += mask_loss.item()
                             # recon_loss_sum += mask_loss.item()
@@ -2039,7 +2049,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             continue
 
                 # 计算平均值
-                avg_recon_loss = (recon_loss_sum + 0.1*adv_loss_sum + bqd_loss_sum*0.1) / max(total_batches, 1)
+                avg_recon_loss = (
+                    recon_loss_sum + 0.1 * adv_loss_sum + bqd_loss_sum*0.1
+                ) / max(total_batches, 1)
                 avg_adv_loss = adv_loss_sum / max(total_batches, 1)
                 avg_real_acc = real_acc_sum / max(total_batches, 1)
                 avg_fake_acc = fake_acc_sum / max(total_batches, 1)
@@ -2075,46 +2087,60 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                     "bqd_loss": 0.0,
                 }
 
-        def merge_local_to_global(
-            local_data, global_data, global_mask, metadata, kernel_size=33
-        ):
+        def merge_local_to_global(local_data, global_data, global_mask, metadata):
             """
             Merge local patch data into global data based on metadata.
-            优化：增加错误处理和内存管理
+            
+            metadata格式: [center_y, center_x, local_size, sample_idx, coverage_ratio, missing_ratio, local_size]
+            其中center_y, center_x是local中心在global中的位置
             """
             try:
+                local_data = local_data.unsqueeze(1)  # 确保local_data是4D张量
                 merged_data = global_data.clone()
                 merged_mask = global_mask.clone()
-
                 pos = []
+                
                 for i in range(len(metadata)):
-                    centerx = metadata[i][0]
-                    centery = metadata[i][1]
-                    xbegain = metadata[i][2]
-                    ybegain = metadata[i][3]
-
-                    # Calculate the top-left corner of the kernel_size x kernel_size window
-                    minx = int(centerx - xbegain) - kernel_size // 2
-                    maxx = int(centerx - xbegain) + kernel_size // 2 + 1
-                    miny = int(centery - ybegain) - kernel_size // 2
-                    maxy = int(centery - ybegain) + kernel_size // 2 + 1
-
-                    # Embed the local data into the global data
-                    merged_data[i, :, minx:maxx, miny:maxy] = local_data[i]
-                    merged_mask[i, :, minx:maxx, miny:maxy] = 1
-                    pos.append([minx, maxx, miny, maxy])
-
+                    # 提取metadata信息
+                    center_y = int(metadata[i][0])  # local中心在global中的y坐标
+                    center_x = int(metadata[i][1])  # local中心在global中的x坐标
+                    local_size = int(metadata[i][2])  # local尺寸
+                    
+                    # 计算local区域在global中的边界
+                    half_size = local_size // 2
+                    min_y = center_y - half_size
+                    max_y = center_y + half_size + 1  # +1因为Python切片是左闭右开
+                    min_x = center_x - half_size  
+                    max_x = center_x + half_size + 1
+                    
+                    # 边界检查
+                    if min_y < 0 or min_x < 0 or max_y > global_data.size(2) or max_x > global_data.size(3):
+                        print(f"警告: 样本{i}位置越界 - center:({center_y},{center_x}), size:{local_size}")
+                        print(f"       范围: y[{min_y},{max_y}), x[{min_x},{max_x})")
+                        print(f"       global size: {global_data.shape}")
+                        continue
+                    
+                    # 嵌入local数据到global中
+                    merged_data[i, :, min_y:max_y, min_x:max_x] = local_data[i, :, :, :]
+                    merged_mask[i, :, min_y:max_y, min_x:max_x] = 1
+                    
+                    pos.append([min_y, max_y, min_x, max_x])
+                    
                 return merged_data, merged_mask, pos
-
+                
             except Exception as e:
-                print(f"合并本地到全局数据时发生错误: {e}")
-                # 返回原始数据作为fallback
-                return global_data.clone(), global_mask.clone(), []
-        
+                print(f"合并错误: {e}")
+                print(f"local_data shape: {local_data.shape}")
+                print(f"global_data shape: {global_data.shape}")
+                for i, meta in enumerate(metadata):
+                    print(f"metadata[{i}]: center=({meta[0]},{meta[1]}), size={meta[2]}")
+                raise
+
         def normalization(inputs, global_inputs):
+            # print(f"normalization inputs shape: {inputs.shape}, global_inputs shape: {global_inputs.shape}")
             gmin = global_inputs.min()
             gmax = global_inputs.max()
-        
+
             # 避免除零错误
             if gmax - gmin > 1e-8:
                 # 归一化到[0, 1]
@@ -2135,7 +2161,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                 scaler = GradScaler()
                 scaler_bqd = GradScaler()
                 opt_cn_p1 = Adadelta(model_cn.parameters())
-                
+
                 if bqd_lr is not None:
                     opt_bqd.param_groups[0]["lr"] = bqd_lr
 
@@ -2162,13 +2188,13 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             ) = batch_data
 
                             # ==================== 修复：正确实现梯度累积 ====================
-                            
+
                             #### 第1次backward - BQD网络学习识别生成输出边缘 ####
                             for param in model_cn.parameters():
                                 param.requires_grad = False
                             for param in model_bqd.parameters():
                                 param.requires_grad = True
-                            
+
                             with torch.no_grad():
                                 outputs = safe_tensor_operation(
                                     model_cn,
@@ -2177,24 +2203,30 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     batch_global_inputs,
                                     batch_global_masks,
                                 )
-                            nld_o = normalization(outputs, batch_global_inputs)                 
+                            nld_o = normalization(outputs, batch_global_inputs)
                             bqd_outputs_out, bqd_loss_out, _ = model_bqd(
                                 nld_o.detach(),
                                 batch_local_masks,
                             )
                             bqd_loss_out = ensure_scalar_loss(bqd_loss_out)
                             bqd_loss_out_scaled = bqd_loss_out / accumulation_steps
-                            scaler_bqd.scale(bqd_loss_out_scaled).backward(retain_graph=True)
+                            scaler_bqd.scale(bqd_loss_out_scaled).backward(
+                                retain_graph=True
+                            )
                             # bqd_loss_out_scaled.backward(retain_graph=True)
 
                             #### 第2次backward - BQD网络学习识别原始输入边缘 ####\
-                            nld_li = normalization(batch_local_inputs, batch_global_inputs)
+                            nld_li = normalization(
+                                batch_local_inputs, batch_global_inputs
+                            )
                             bqd_outputs_in, bqd_loss_in, _ = model_bqd(
                                 nld_li, batch_local_masks
                             )
                             bqd_loss_in = ensure_scalar_loss(bqd_loss_in)
                             bqd_loss_in_scaled = bqd_loss_in / accumulation_steps
-                            scaler_bqd.scale(bqd_loss_in_scaled).backward(retain_graph=True)
+                            scaler_bqd.scale(bqd_loss_in_scaled).backward(
+                                retain_graph=True
+                            )
                             # bqd_loss_in_scaled.backward(retain_graph=True)
 
                             #### 第3次backward - 补全网络的重建+对抗损失 ####
@@ -2229,16 +2261,20 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 completed_mask,
                                 pos,
                             )
-                            
+
                             # BQD对抗损失（让生成结果欺骗BQD）
                             nld_lo = normalization(outputs, batch_global_inputs)
                             _, _, bqd_loss_mask_adversarial = model_bqd(
                                 nld_lo, batch_local_masks
                             )
-                            bqd_loss_mask_adversarial = ensure_scalar_loss(bqd_loss_mask_adversarial)
-                            
+                            bqd_loss_mask_adversarial = ensure_scalar_loss(
+                                bqd_loss_mask_adversarial
+                            )
+
                             # 组合损失并应用梯度累积缩放
-                            total_cn_loss = (recon_loss + bqd_loss_mask_adversarial) / accumulation_steps
+                            total_cn_loss = (
+                                recon_loss + bqd_loss_mask_adversarial
+                            ) / accumulation_steps
                             # scaler.scale(total_cn_loss).backward()
                             total_cn_loss.backward()
 
@@ -2248,24 +2284,36 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             if accumulated_step % accumulation_steps == 0:
                                 # 更新补全网络
                                 # scaler.unscale_(opt_cn_p1)
-                                torch.nn.utils.clip_grad_norm_(model_cn.parameters(), max_norm=1.0)
+                                torch.nn.utils.clip_grad_norm_(
+                                    model_cn.parameters(), max_norm=1.0
+                                )
                                 # scaler.step(opt_cn_p1)
                                 opt_cn_p1.step()
                                 # scaler.update()
                                 opt_cn_p1.zero_grad(set_to_none=True)
-                            if accumulated_step % (accumulation_steps*2) == 0:
+                            if accumulated_step % (accumulation_steps * 2) == 0:
                                 # 更新BQD网络
                                 scaler_bqd.unscale_(opt_bqd)
-                                torch.nn.utils.clip_grad_norm_(model_bqd.parameters(), max_norm=1.0)
+                                torch.nn.utils.clip_grad_norm_(
+                                    model_bqd.parameters(), max_norm=1.0
+                                )
                                 scaler_bqd.step(opt_bqd)
                                 # opt_bqd.step()
                                 scaler_bqd.update()
                                 opt_bqd.zero_grad(set_to_none=True)
 
                             # Update Visdom plot for training loss
-                            if viz is not None and "phase1_train" in loss_windows and step%100==0:
+                            if (
+                                viz is not None
+                                and "phase1_train" in loss_windows
+                                and step % 100 == 0
+                            ):
                                 try:
-                                    y0 = recon_loss.item() if recon_loss.item() < 1000 else -1
+                                    y0 = (
+                                        recon_loss.item()
+                                        if recon_loss.item() < 1000
+                                        else -1
+                                    )
                                     y = torch.tensor(
                                         [y0, bqd_loss_in.item(), bqd_loss_out.item()]
                                     ).float()
@@ -2285,32 +2333,32 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     # 准备Phase 1的状态信息
                                     phase1_schedulers = None  # Phase 1通常不使用调度器
                                     phase1_scalers = {
-                                        "cn": scaler,        # Phase 1的CN缩放器
-                                        "bqd": scaler_bqd,   # Phase 1的BQD缩放器
+                                        "cn": scaler,  # Phase 1的CN缩放器
+                                        "bqd": scaler_bqd,  # Phase 1的BQD缩放器
                                     }
-                                    
+
                                     save_checkpoint(
                                         model_cn,
-                                        None,              # Phase 1不保存CD模型
+                                        None,  # Phase 1不保存CD模型
                                         model_bqd,
-                                        opt_cn_p1,         # Phase 1的CN优化器
-                                        None,              # Phase 1不使用CD优化器
+                                        opt_cn_p1,  # Phase 1的CN优化器
+                                        None,  # Phase 1不使用CD优化器
                                         opt_bqd,
                                         step,
-                                        1,                 # phase = 1
+                                        1,  # phase = 1
                                         result_dir,
                                         best_val_loss=best_val_loss,
-                                        best_acc=None,     # Phase 1不追踪准确率
+                                        best_acc=None,  # Phase 1不追踪准确率
                                         cn_lr=opt_cn_p1.param_groups[0]["lr"],
-                                        cd_lr=None,        # Phase 1不使用CD
+                                        cd_lr=None,  # Phase 1不使用CD
                                         bqd_lr=opt_bqd.param_groups[0]["lr"],
                                         schedulers=phase1_schedulers,
                                         scalers=phase1_scalers,
                                         stability_tracker=None,  # Phase 1不使用稳定性追踪器
                                     )
-                                    
+
                                     print(f"✅ Phase 1 检查点已保存 (step {step})")
-                                    
+
                                 except Exception as e:
                                     print(f"❌ Phase 1 保存检查点失败: {e}")
 
@@ -2538,19 +2586,19 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                                             # 清理变量
                                             del test_output, completed
-                                   
+
                                             del (
                                                 # val_batch,
                                                 val_local_inputs,
                                                 # val_local_masks,
                                                 val_local_targets,
                                             )
-                                            '''del (
+                                            """del (
                                                 val_global_inputs,
                                                 val_global_masks,
                                                 val_global_targets,
                                             )
-'''
+"""
                                         except Exception as e:
                                             print(f"生成测试完成图像时失败: {e}")
                                             cleanup_memory()
@@ -3083,8 +3131,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     )
                                     * fm_weight
                                 )
-                                if fm_loss.mean()> loss_real.mean() and fm_loss.mean() > loss_fake.mean():
-                                    fm_loss*=1
+                                if (
+                                    fm_loss.mean() > loss_real.mean()
+                                    and fm_loss.mean() > loss_fake.mean()
+                                ):
+                                    fm_loss *= 1
                                     # print("fm_loss weight reduced")
                                 lsb_loss = log_scale_balance_loss(loss_real, loss_fake)
                                 r1_loss = r1_regularization(
@@ -3172,7 +3223,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             pbar.update(1)
 
                             # Visdom可视化
-                            if viz is not None and step%100==0:
+                            if viz is not None and step % 100 == 0:
                                 try:
                                     if "phase2_disc" in loss_windows:
                                         viz.line(
@@ -3394,12 +3445,15 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
 
                                     # 准备Phase 2专用的状态
                                     phase1_scalers = {}
-                                    if 'scaler' in locals() and scaler is not None:
-                                        phase1_scalers['cn'] = scaler
-                                    if 'scaler_bqd' in locals() and scaler_bqd is not None:
-                                        phase1_scalers['bqd'] = scaler_bqd
-                                    
-                                    '''save_checkpoint(
+                                    if "scaler" in locals() and scaler is not None:
+                                        phase1_scalers["cn"] = scaler
+                                    if (
+                                        "scaler_bqd" in locals()
+                                        and scaler_bqd is not None
+                                    ):
+                                        phase1_scalers["bqd"] = scaler_bqd
+
+                                    """save_checkpoint(
                                         model_cn,
                                         None,              # Phase 1不需要CD
                                         model_bqd,
@@ -3417,7 +3471,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         schedulers=None,   # Phase 1不使用调度器
                                         scalers=phase1_scalers if phase1_scalers else None,
                                         stability_tracker=None,
-                                    )'''
+                                    )"""
                                     save_checkpoint(
                                         model_cn,
                                         model_cd,
@@ -3429,7 +3483,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                         2,
                                         result_dir,
                                         best_acc=best_acc,
-                                        cd_lr=opt_cd_p2.param_groups[0]["lr"]
+                                        cd_lr=opt_cd_p2.param_groups[0]["lr"],
                                     )
 
                                 except Exception as e:
@@ -3555,11 +3609,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             for param in model_cd.parameters():
                                 param.requires_grad = True
 
-                            '''with autocast(
+                            """with autocast(
                                 device_type=device.type,
                                 dtype=torch.float32,
                                 enabled=True,
-                            ):'''
+                            ):"""
                             # 生成假样本
                             with torch.no_grad():
                                 fake_outputs = safe_tensor_operation(
@@ -3573,8 +3627,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             # 应用适度噪声
                             batch_local_targets_noisy = (
                                 batch_local_targets
-                                + torch.randn_like(batch_local_targets)
-                                * noise_level
+                                + torch.randn_like(batch_local_targets) * noise_level
                             )
                             fake_outputs_noisy = (
                                 fake_outputs
@@ -3600,31 +3653,25 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             )
 
                             # 标签平滑
-                            real_labels = (
-                                torch.ones(batch_size, 1, device=device) * 0.9
-                            )
+                            real_labels = torch.ones(batch_size, 1, device=device) * 0.9
                             fake_labels = (
                                 torch.zeros(batch_size, 1, device=device) + 0.1
                             )
 
                             # 判别器前向传播
-                            fake_predictions, fake_lf, fake_gf = (
-                                safe_tensor_operation(
-                                    model_cd,
-                                    fake_outputs_noisy,
-                                    batch_local_masks,
-                                    fake_global_embedded,
-                                    fake_global_mask_embedded,
-                                )
+                            fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
+                                model_cd,
+                                fake_outputs_noisy,
+                                batch_local_masks,
+                                fake_global_embedded,
+                                fake_global_mask_embedded,
                             )
-                            real_predictions, real_lf, real_gf = (
-                                safe_tensor_operation(
-                                    model_cd,
-                                    batch_local_targets_noisy,
-                                    batch_local_masks,
-                                    real_global_embedded,
-                                    real_global_mask_embedded,
-                                )
+                            real_predictions, real_lf, real_gf = safe_tensor_operation(
+                                model_cd,
+                                batch_local_targets_noisy,
+                                batch_local_masks,
+                                real_global_embedded,
+                                real_global_mask_embedded,
                             )
 
                             # 计算准确率
@@ -3692,7 +3739,9 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 )
 
                             # 第一次backward
-                            nld_fo = normalization(fake_outputs_for_bqd, batch_global_inputs)
+                            nld_fo = normalization(
+                                fake_outputs_for_bqd, batch_global_inputs
+                            )
 
                             _, bqd_loss_out, _ = model_bqd(
                                 nld_fo,
@@ -3706,19 +3755,22 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             )
 
                             # 第二次backward
-                            nld_li = normalization(batch_local_inputs, batch_global_inputs)
+                            nld_li = normalization(
+                                batch_local_inputs, batch_global_inputs
+                            )
                             bqd_outputs_in, bqd_loss_in, _ = model_bqd(
                                 nld_li, batch_local_masks
                             )
                             bqd_loss_in = ensure_scalar_loss(bqd_loss_in)
                             bqd_loss_in_scaled = bqd_loss_in / accumulation_steps * 2
 
-                            bqd_loss_ta_scaled = (bqd_loss_out_scaled + bqd_loss_in_scaled)
+                            bqd_loss_ta_scaled = (
+                                bqd_loss_out_scaled + bqd_loss_in_scaled
+                            )
                             scaler_bqd_p3.scale(bqd_loss_ta_scaled).backward()
                             # bqd_loss_ta_scaled.backward()
-                            
-                            
-                            '''# 第3次backward
+
+                            """# 第3次backward
                             bqd_outputs_ta, bqd_loss_ta, _ = model_bqd(
                                 batch_local_targets, torch.zeros_like(batch_local_targets)
                             )
@@ -3726,9 +3778,13 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             bqd_loss_ta_scaled = (
                                 bqd_loss_ta / accumulation_steps * 2
                             )
-                            scaler_bqd_p3.scale(bqd_loss_ta_scaled).backward() '''
+                            scaler_bqd_p3.scale(bqd_loss_ta_scaled).backward() """
 
-                            av_bqd_loss = (bqd_loss_in_scaled + bqd_loss_out_scaled + bqd_loss_ta_scaled) / 3
+                            av_bqd_loss = (
+                                bqd_loss_in_scaled
+                                + bqd_loss_out_scaled
+                                + bqd_loss_ta_scaled
+                            ) / 3
 
                             # - 补全网络的对抗损失（让生成结果欺骗BQD） ####
 
@@ -3755,11 +3811,11 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             for param in model_cn.parameters():
                                 param.requires_grad = True
 
-                            '''with autocast(
+                            """with autocast(
                                 device_type=device.type,
                                 dtype=torch.float32,
                                 enabled=True,
-                            ):'''
+                            ):"""
                             # 重新生成（需要梯度）
                             fake_outputs = safe_tensor_operation(
                                 model_cn,
@@ -3797,14 +3853,12 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     metadata,
                                 )
                             )
-                            fake_predictions, fake_lf, fake_gf = (
-                                safe_tensor_operation(
-                                    model_cd,
-                                    fake_outputs,
-                                    batch_local_masks,
-                                    fake_global_embedded,
-                                    fake_global_mask_embedded,
-                                )
+                            fake_predictions, fake_lf, fake_gf = safe_tensor_operation(
+                                model_cd,
+                                fake_outputs,
+                                batch_local_masks,
+                                fake_global_embedded,
+                                fake_global_mask_embedded,
                             )
                             loss_cn_adv = F.binary_cross_entropy_with_logits(
                                 fake_predictions, real_labels
@@ -3813,8 +3867,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             nld_fo = normalization(fake_outputs, batch_global_inputs)
                             _, _, bloss = model_bqd(nld_fo, batch_local_masks)
                             # 确保loss是标量 - 新增这行
-                            bloss = ensure_scalar_loss(bloss) 
-                            '''if step>steps_3 * 3/5:
+                            bloss = ensure_scalar_loss(bloss)
+                            '''if step > steps_3 * 3 / 5:
                                 bloss *= 1.5
                                 loss_cn_adv *= 2'''
 
@@ -3900,7 +3954,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                 param.requires_grad = True
 
                             # ==================== 可视化和进度更新 ====================
-                            if viz is not None and step%100==0:
+                            if viz is not None and step % 100 == 0:
                                 try:
                                     if "phase3_disc" in loss_windows:
                                         viz.line(
@@ -3943,8 +3997,8 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                             pbar.set_description(
                                 f"Phase 3 | D: {(loss_cd.item() * accumulation_steps):.4f}, "
                                 f"G: {(loss_cn.item() * accumulation_steps):.4f}, "
-                                f"Dis-p: {alpha_g * loss_cn_adv}, Smooth-p: {bloss.item()*0.1:.4f},"
-                                f"Rec-p: {loss_cn_recon:.3f}, "
+                                f"R_acc: {real_acc:.3f}, F_acc: {fake_acc:.3f}, "
+                                f"Smooth E: {bloss.item() * accumulation_steps:.4f}, "
                             )
                             pbar.update(1)
 
@@ -4084,15 +4138,22 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                                     metadata,
                                                 )
                                             )
-                                            nld_tli = normalization(test_local_inputs, test_global_inputs)
-                                            nld_to = normalization(test_output, test_global_inputs)
-                                            nld_tlt = normalization(test_local_targets, test_global_inputs)
+                                            nld_tli = normalization(
+                                                test_local_inputs, test_global_inputs
+                                            )
+                                            nld_to = normalization(
+                                                test_output, test_global_inputs
+                                            )
+                                            nld_tlt = normalization(
+                                                test_local_targets, test_global_inputs
+                                            )
                                             bqd_in, _, _ = model_bqd(
                                                 nld_tli, test_local_masks
                                             )
                                             bqd_out, _, _ = model_bqd(
                                                 nld_to, test_local_masks
                                             )
+                                            nld_tlt = nld_tlt.unsqueeze(1)
                                             bqd_target, _, _ = model_bqd(
                                                 nld_tlt, test_local_masks
                                             )
@@ -4119,6 +4180,7 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                             )
                                         except Exception as e:
                                             print(f"可视化失败: {e}")
+                                            traceback.print_exc()
 
                                     folder = os.path.join(result_dir, "phase_3")
 
@@ -4165,16 +4227,38 @@ def train(dir, envi, cuda, batch, test=False, resume_from=None, Phase=1):
                                     )
 
                                     save_checkpoint(
-                                        model_cn, model_cd, model_bqd,
-                                        opt_cn_p3, opt_cd_p3, opt_bqd,
-                                        step, 3, result_dir,
+                                        model_cn,
+                                        model_cd,
+                                        model_bqd,
+                                        opt_cn_p3,
+                                        opt_cd_p3,
+                                        opt_bqd,
+                                        step,
+                                        3,
+                                        result_dir,
                                         best_val_loss=best_val_loss_joint,
                                         cn_lr=opt_cn_p3.param_groups[0]["lr"],
                                         cd_lr=opt_cd_p3.param_groups[0]["lr"],
                                         bqd_lr=opt_bqd.param_groups[0]["lr"],
-                                        schedulers={"cn": scheduler_cn, "cd": scheduler_cd} if 'scheduler_cn' in locals() else None,
-                                        scalers={"cn": scaler_cn, "cd": scaler_cd, "bqd": scaler_bqd_p3} if 'scaler_cn' in locals() else None,
-                                        stability_tracker=stability_tracker if 'stability_tracker' in locals() else None,
+                                        schedulers=(
+                                            {"cn": scheduler_cn, "cd": scheduler_cd}
+                                            if "scheduler_cn" in locals()
+                                            else None
+                                        ),
+                                        scalers=(
+                                            {
+                                                "cn": scaler_cn,
+                                                "cd": scaler_cd,
+                                                "bqd": scaler_bqd_p3,
+                                            }
+                                            if "scaler_cn" in locals()
+                                            else None
+                                        ),
+                                        stability_tracker=(
+                                            stability_tracker
+                                            if "stability_tracker" in locals()
+                                            else None
+                                        ),
                                     )
 
                                 except Exception as e:
@@ -4305,16 +4389,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"e:\KingCrimson Dataset\Simulate\data0\results34\latest_checkpoint.pth",
+        default=r"",
         help="resume from checkpoint path",
     )
     parser.add_argument(
-        "--dir", type=str, default="results34", help="directory to save results"
+        "--dir", type=str, default="results32", help="directory to save results"
     )
     parser.add_argument(
-        "--envi", type=str, default="DEM34", help="visdom environment name"
+        "--envi", type=str, default="DEM32", help="visdom environment name"
     )
-    parser.add_argument("--cuda", type=str, default="cuda:2", help="CUDA device to use")
+    parser.add_argument("--cuda", type=str, default="cuda:0", help="CUDA device to use")
     parser.add_argument(
         "--test", type=bool, default=False, help="whether to run in test mode"
     )
