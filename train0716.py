@@ -4305,7 +4305,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume",
         type=str,
-        default=r"e:\KingCrimson Dataset\Simulate\data0\results34\latest_checkpoint.pth",
+        default=r"", #r"e:\KingCrimson Dataset\Simulate\data0\results34\latest_checkpoint.pth",
         help="resume from checkpoint path",
     )
     parser.add_argument(

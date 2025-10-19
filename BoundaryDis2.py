@@ -4,10 +4,77 @@ import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader
 from DemDataset2 import DemDataset
+import os
 
 # from train import simple_dataset_split, fast_collate_fn
 import matplotlib.pyplot as plt
 
+save_path = r"e:\KingCrimson Dataset\Comparation\BQDvis\BQD33"
+global cnt
+cnt=0
+
+def _tensor_to_numpy(tensor):
+    """将张量转换为numpy数组用于保存图片"""
+    if tensor.dim() == 4:  # [B, C, H, W]
+        # 取第一个batch和第一个channel
+        tensor = tensor[0, 0]
+    elif tensor.dim() == 3:  # [C, H, W]
+        tensor = tensor[0]
+    elif tensor.dim() == 2:  # [H, W]
+        pass
+    else:
+        raise ValueError(f"Unexpected tensor dimension: {tensor.dim()}")
+    
+    # 转换为numpy并移动到CPU
+    return tensor.detach().cpu().numpy()
+
+def _save_terrain_image(data, filename, binary=False, inc=False):
+    """
+    保存地形图或二值图样式的图片
+    
+    Args:
+        data: 输入数据（tensor或numpy数组）
+        filename: 文件名
+        save_path: 保存路径
+        binary: 是否绘制二值图（黑白），False为地形图
+    """
+    if inc:
+        global cnt
+        cnt+=1
+    # 转换数据
+    if torch.is_tensor(data):
+        data = _tensor_to_numpy(data)
+    
+    # 创建图形，去掉所有边框和空白
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # 选择颜色映射
+    if binary:
+        # 二值图：黑白
+        cmap = 'gray'
+        # 确保数据在[0,1]范围内用于二值显示
+        vmin, vmax = 0, 1
+    else:
+        # 地形图
+        cmap = 'terrain'
+        vmin, vmax = None, None
+    
+    # 显示图像
+    ax.imshow(data, cmap=cmap, aspect='equal', vmin=vmin, vmax=vmax)
+    
+    # 移除所有装饰元素
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_frame_on(False)
+    
+    # 移除图形周围的空白
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    
+    # 保存图片
+    filepath = os.path.join(save_path, filename)
+    plt.savefig(filepath, dpi=150, bbox_inches='tight', pad_inches=0)
+    plt.close()  # 释放内存
+    print(f"Saved: {filepath}")
 
 class BoundaryQualityDiscriminator(nn.Module):
     """
@@ -20,6 +87,7 @@ class BoundaryQualityDiscriminator(nn.Module):
 
     def __init__(self, input_channels=1, input_size=33):
         super().__init__()
+        self.input_size = input_size
 
         self.ture_extractor = BoundaryDetector(input_size)
         # 边界提取网络
@@ -61,12 +129,16 @@ class BoundaryQualityDiscriminator(nn.Module):
         """
         # 提取边界
         extracted_boundary = self.boundary_extractor(generated_data)
+        _save_terrain_image(extracted_boundary, f"extracted_boundary_{self.input_size}_{cnt}.png", True)
         # 二值化处理 ？？？？？？？？？？？？是否要二值化？？？？？？？？？？？？？？？？
         # extracted_boundary = (extracted_boundary >= 0.5).float()
         
         # with torch.no_grad():
         true_boundary = self.ture_extractor(mask)  # 使用真实mask提取边界
         true_boundary = true_boundary.detach()
+        _save_terrain_image(true_boundary, f"true_boundary_{self.input_size}_{cnt}.png", True)
+        _save_terrain_image(mask, f"input_mask_{self.input_size}_{cnt}.png",True)
+        _save_terrain_image(generated_data, f"generated_data_{self.input_size}_{cnt}.png",False,True)
 
         # 评估提取质量（可选）
         """boundary_error = F.mse_loss(extracted_boundary, true_boundary, reduction="none")
