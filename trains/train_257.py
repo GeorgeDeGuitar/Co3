@@ -34,7 +34,7 @@ from data_manage.fastdatageneration import PreGeneratedMaskDataset
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from models.BoundaryDis import BoundaryQualityDiscriminator
+from models.SurfaceDis import BoundaryQualityDiscriminator
 
 import random
 import gc
