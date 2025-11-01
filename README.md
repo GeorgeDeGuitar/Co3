@@ -7,7 +7,8 @@ The main branch is currently under refactoring:
   -losses: definitions of losses while training;
   -models: the models of completion network, context discriminator and surface discriminator;
   -trains: files for network training under various missing region scales;
-  -test_dataset: dataset samples for training and inference.
+  -test_dataset: dataset samples for training and inference;
+  -samples: samples of the output data, incuding global and local scales.
   
 The most complete code is in the ganbest branch, but not well-organized.
 
